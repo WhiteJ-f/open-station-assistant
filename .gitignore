@@ -1,0 +1,36 @@
+# Binaries and build artifacts
+station-assistant
+rhvoice_synth
+station-spotter
+target/
+*.o
+*.a
+*.so
+
+# Sensitive configs and keys
+config.json
+singbox.json
+*.key
+*.pem
+*.pub
+id_*
+known_hosts
+
+# Logs and runtime artifacts
+*.log
+*.pid
+/tmp/
+
+# Audio test dumps
+*.raw
+*.wav
+*.pcm
+*.flac
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

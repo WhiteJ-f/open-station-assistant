@@ -1,0 +1,17 @@
+[package]
+name = "station-spotter"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tract-core = "0.23"
+tract-onnx = "0.23"
+circular-buffer = "1.2"
+rust-embed = "8.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

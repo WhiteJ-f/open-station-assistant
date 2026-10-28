@@ -1,0 +1,23 @@
+{
+  "groq_api_key": "YOUR_GROQ_API_KEY_HERE",
+  "groq_base_url": "https://api.groq.com/openai/v1",
+  "stt_model": "whisper-large-v3-turbo",
+  "llm_model": "qwen/qwen3.8-27b",
+  "tts_voice": "Anna",
+  "tts_speed": 100,
+  "tts_pitch": 100,
+  "default_volume": 15,
+  "chime_sound": "/bkupgrade/data/chime.wav",
+  "cancel_sound": "/bkupgrade/data/cancel.wav",
+  "volume_sound": "/bkupgrade/data/volume.wav",
+  "wake_words": ["jarvis", "alexa"],
+  "local_wakeword_model": "alexa,jarvis",
+  "wakeword_threshold": 0.35,
+  "sensor_enabled": false,
+  "city": "Moscow",
+  "latitude": 55.7558,
+  "longitude": 37.6173,
+  "timezone_offset_hours": 3,
+  "byedpi_enabled": false,
+  "byedpi_port": 1080
+}
