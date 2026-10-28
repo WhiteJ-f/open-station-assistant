@@ -38,7 +38,7 @@ func (ac *AudioCapture) SetPaused(p bool) {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	ac.paused = p
-	// Drain channels on both pause and unpause
+	// Drain stale audio chunks on state transition
 	for len(ac.pcmChan) > 0 {
 		<-ac.pcmChan
 	}
@@ -85,8 +85,7 @@ func (ac *AudioCapture) streamWorker() {
 		rawBuf := make([]byte, chunkSize)
 
 		// 150Hz 1st-order IIR High-Pass Filter (fs = 48000 Hz)
-		// Strips sub-audible room rumble, air drafts, and DC offset
-		// alpha = 1 / (1 + 2*pi*150/48000) = 0.9807
+		// Strips sub-audible room rumble and DC bias
 		const hpfAlpha = 0.9807
 		var lastIn, lastOut float64
 
@@ -110,21 +109,20 @@ func (ac *AudioCapture) streamWorker() {
 				continue
 			}
 
-			// Capture from true physical MEMS microphone pair (Channels 2 and 3)
-			// Averaging (Ch2 + Ch3) / 2.0 provides 360-degree acoustic coverage and boosts SNR by 3 dB.
-			// Apply 150 Hz HPF in real time: passes 100% of human speech formants (300-3400 Hz)
-			// while completely eliminating room rumble, fan noise, and DC bias.
-			// Apply 12.0x (+21.6 dB) digital preamp gain: aligns raw digital MEMS levels
-			// with nominal conversational speech range for openWakeWord neural network and VAD.
+			// In Yandex Station Mini ALSA hw:0,2 (4-channel capture):
+			// Channel 0 (idx+0 : idx+2): MEMS Mic A (active acoustic pickup)
+			// Channel 1 (idx+2 : idx+4): MEMS Mic B (active acoustic pickup)
+			// Channels 2 and 3 are hardware reference/decimator lanes with alternating zero-fill.
+			// Averaging (Ch0 + Ch1) / 2.0 provides 360-degree acoustic pickup and +3 dB SNR gain.
 			numSamples := chunkSize / 8
 			monoChunk := make([]int16, numSamples)
-			const micPreampGain = 12.0
+			const micPreampGain = 3.0
 
 			for i := 0; i < numSamples; i++ {
 				idx := i * 8
-				s2 := float64(int16(binary.LittleEndian.Uint16(rawBuf[idx+4 : idx+6])))
-				s3 := float64(int16(binary.LittleEndian.Uint16(rawBuf[idx+6 : idx+8])))
-				s := (s2 + s3) / 2.0
+				s0 := float64(int16(binary.LittleEndian.Uint16(rawBuf[idx : idx+2])))
+				s1 := float64(int16(binary.LittleEndian.Uint16(rawBuf[idx+2 : idx+4])))
+				s := (s0 + s1) / 2.0
 				out := hpfAlpha * (lastOut + s - lastIn)
 				lastIn = s
 				lastOut = out
@@ -138,7 +136,7 @@ func (ac *AudioCapture) streamWorker() {
 				monoChunk[i] = int16(out)
 			}
 
-			// Downsample 48kHz to 16kHz (3:1 integer decimation with moving average anti-aliasing)
+			// Downsample 48kHz to 16kHz for wake-word engine (3:1 integer decimation with moving average anti-aliasing)
 			num16k := numSamples / 3
 			chunk16k := make([]int16, num16k)
 			for j := 0; j < num16k; j++ {
@@ -150,7 +148,6 @@ func (ac *AudioCapture) streamWorker() {
 			select {
 			case ac.pcmChan <- monoChunk:
 			default:
-				// Channel full, drop oldest frame
 				select {
 				case <-ac.pcmChan:
 				default:
@@ -174,14 +171,12 @@ func (ac *AudioCapture) streamWorker() {
 	}
 }
 
-// RecordSpeechWithVAD waits for speech and records until 750ms trailing silence.
+// RecordSpeechWithVAD waits for speech and records until trailing silence.
 func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-chan struct{}) ([]byte, error) {
-	// Drain stale frames before listening
 	for len(ac.pcmChan) > 0 {
 		<-ac.pcmChan
 	}
 
-	// Pre-speech ring buffer (last 8 frames = 400ms to preserve soft word onsets)
 	var preSpeechRing [][]int16
 	maxRingSize := 8
 
@@ -191,7 +186,7 @@ func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-
 	var totalSpeechDuration time.Duration
 	var activeFramesCount int
 
-	noiseFloor := 7.0 // calibrated ambient room noise on hardware with 12x preamp
+	noiseFloor := 12.0 // calibrated ambient room noise on hardware with 3x preamp
 	frameDuration := 50 * time.Millisecond
 	startTime := time.Now()
 	lastLogTime := time.Now()
@@ -217,20 +212,18 @@ func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-
 			continue
 		}
 
-		// Compute AC RMS
 		var sumSquares float64
 		for _, s := range chunk {
 			sumSquares += float64(s) * float64(s)
 		}
 		rms := math.Sqrt(sumSquares / float64(len(chunk)))
 
-		// Voice threshold: 1.45x ambient noise, clamped to [12.0, 120.0]
-		threshold := noiseFloor * 1.45
-		if threshold < 12.0 {
-			threshold = 12.0
+		threshold := noiseFloor * 1.55
+		if threshold < 20.0 {
+			threshold = 20.0
 		}
-		if threshold > 120.0 {
-			threshold = 120.0
+		if threshold > 180.0 {
+			threshold = 180.0
 		}
 
 		if time.Since(lastLogTime) >= 2500*time.Millisecond && !speechActive {
@@ -256,8 +249,8 @@ func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-
 		} else {
 			if !speechActive {
 				noiseFloor = 0.95*noiseFloor + 0.05*rms
-				if noiseFloor > 50.0 {
-					noiseFloor = 50.0
+				if noiseFloor > 60.0 {
+					noiseFloor = 60.0
 				}
 				preSpeechRing = append(preSpeechRing, chunk)
 				if len(preSpeechRing) > maxRingSize {
@@ -268,9 +261,8 @@ func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-
 				silenceDuration += frameDuration
 				totalSpeechDuration += frameDuration
 
-				if silenceDuration >= 350*time.Millisecond {
+				if silenceDuration >= 450*time.Millisecond {
 					if activeFramesCount < 4 || (totalSpeechDuration-silenceDuration) < 200*time.Millisecond {
-						// Transient click or false alarm: reset and continue listening until full timeout expires
 						speechActive = false
 						activeFramesCount = 0
 						silenceDuration = 0
@@ -278,7 +270,8 @@ func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-
 						speechFrames = nil
 						continue
 					}
-					log.Printf("[VAD] Speech utterance complete (%v audio, %v trailing silence, %d active frames)", totalSpeechDuration-silenceDuration, silenceDuration, activeFramesCount)
+					log.Printf("[VAD] Speech utterance complete (%v audio, %v trailing silence, %d active frames)",
+						totalSpeechDuration-silenceDuration, silenceDuration, activeFramesCount)
 					break
 				}
 			}
@@ -294,7 +287,7 @@ func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-
 		allSamples = append(allSamples, f...)
 	}
 
-	// Digital AGC normalization: bring quiet microphone peak up to optimal Whisper range (~18,000)
+	// Digital AGC normalization: bring microphone peak up to optimal Whisper range (~18,000)
 	var maxAbs int16
 	for _, s := range allSamples {
 		abs := s
@@ -308,8 +301,8 @@ func (ac *AudioCapture) RecordSpeechWithVAD(timeout time.Duration, cancelChan <-
 
 	if maxAbs > 0 && maxAbs < 16000 {
 		gain := float64(18000) / float64(maxAbs)
-		if gain > 600.0 {
-			gain = 600.0
+		if gain > 400.0 {
+			gain = 400.0
 		}
 		for i := range allSamples {
 			v := float64(allSamples[i]) * gain

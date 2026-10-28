@@ -36,7 +36,7 @@ func NewToFManager(callbacks ToFCallbacks, enabled bool) *ToFManager {
 		return tm
 	}
 
-	log.Println("[ToF] Starting authentic VL53L0X ranging monitor (activation dwell + 10-step discrete tracking + palm stop)...")
+	log.Println("[ToF] Starting authentic VL53L0X ranging monitor (5-frame filter + 280ms dwell + 10 discrete steps)...")
 	go tm.monitorWorker(callbacks)
 	return tm
 }
@@ -62,16 +62,19 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 
 	// Thresholds and geometric bounds (in millimeters)
 	const (
-		palmMuteMaxDist   = 42  // < 42mm hand flat over sensor (stop to standby)
-		volumeMinDist     = 65  // 65mm lower bound for hand height
-		volumeMaxDist     = 340 // 340mm upper bound for hand height
-		openAirMinDist    = 370 // > 370mm considered open air above speaker
-		activationDwellMs = 300 // 300ms stable hand dwell BEFORE entering volume mode
+		palmMuteMaxDist   = 45  // < 45mm hand flat over sensor (stop to standby)
+		volumeMinDist     = 60  // 60mm lower bound for hand height
+		volumeMaxDist     = 350 // 350mm upper bound for hand height
+		openAirMinDist    = 380 // > 380mm considered open air above speaker
+		activationDwellMs = 280 // 280ms stable hand dwell BEFORE entering volume mode
 		stepHeightMm      = 22  // ~22mm vertical hand displacement per volume level (1..10)
 	)
 
 	var (
 		palmFrames int
+
+		// 4-frame moving average to smooth sensor optical jitter
+		smoothWindow []int
 
 		// Activation dwell state
 		dwellAnchorDist int
@@ -107,16 +110,17 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			continue
 		}
 
-		dist, err := strconv.Atoi(fields[0])
+		rawDist, err := strconv.Atoi(fields[0])
 		if err != nil {
 			continue
 		}
 
 		// 8190 = sensor out of range / open air
-		isOpenAir := (dist <= 0 || dist >= 8000 || dist > openAirMinDist)
+		isOpenAir := (rawDist <= 0 || rawDist >= 8000 || rawDist > openAirMinDist)
 
 		if isOpenAir {
 			openAirFrames++
+			smoothWindow = nil
 			dwellStartTime = time.Time{}
 			palmFrames = 0
 
@@ -124,10 +128,10 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			if openAirFrames >= 4 {
 				if volumeModeActive {
 					volumeModeActive = false
-					log.Printf("[ToF] Hand departed -> Volume adjustment mode locked at %d%%.", lastReportedLevel*10)
+					log.Printf("[ToF] Hand departed -> Volume locked at %d%%.", lastReportedLevel*10)
 				}
-				// Reset ignored stationary baseline once clear open air is confirmed
-				if openAirFrames >= 15 {
+				// Reset ignored stationary baseline once clear open air is confirmed for >500ms
+				if openAirFrames >= 16 {
 					ignoredMin = -1
 					ignoredMax = -1
 					stationaryHistory = nil
@@ -139,38 +143,49 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 
 		openAirFrames = 0
 
-		// 1. Stationary obstacle filter (ignores ceilings, shelves, resting objects)
-		if ignoredMin > 0 && dist >= ignoredMin && dist <= ignoredMax {
-			dwellStartTime = time.Time{}
-			palmFrames = 0
-			continue
-		}
-
-		// 2. PALM COVER / HAND OVER SENSOR (< 42mm):
+		// PALM COVER / HAND OVER SENSOR (< 45mm):
 		// Immediate gesture: STOP ANY RUNNING FUNCTION & RETURN TO STANDBY LISTENING!
-		if dist < palmMuteMaxDist {
+		if rawDist < palmMuteMaxDist {
 			palmFrames++
-			if palmFrames == 2 { // Confirmed over 2 consecutive frames (~60ms)
-				log.Println("[ToF] GESTURE: Hand-over-sensor (<42mm) -> STOP ALL TO STANDBY!")
+			if palmFrames == 2 {
+				log.Println("[ToF] GESTURE: Hand-over-sensor (<45mm) -> STOP ALL TO STANDBY!")
 				if cb.OnPalmCover != nil {
 					cb.OnPalmCover()
 				}
 			}
 			dwellStartTime = time.Time{}
 			volumeModeActive = false
+			smoothWindow = nil
 			continue
 		} else {
 			palmFrames = 0
 		}
 
-		// 3. Stationary background obstacle detection:
+		// Moving average filter to eliminate optical noise (window size 4)
+		smoothWindow = append(smoothWindow, rawDist)
+		if len(smoothWindow) > 4 {
+			smoothWindow = smoothWindow[1:]
+		}
+		var sumDist int
+		for _, d := range smoothWindow {
+			sumDist += d
+		}
+		dist := sumDist / len(smoothWindow)
+
+		// 1. Stationary obstacle filter (ignores ceilings, shelves, resting objects)
+		if ignoredMin > 0 && dist >= ignoredMin && dist <= ignoredMax {
+			dwellStartTime = time.Time{}
+			continue
+		}
+
+		// 2. Stationary background obstacle detection:
 		// If height is unchanged (variance <= 12mm) for >= 1000ms while not actively adjusting volume, ignore it.
 		if !volumeModeActive {
 			stationaryHistory = append(stationaryHistory, dist)
-			if len(stationaryHistory) > 12 {
+			if len(stationaryHistory) > 14 {
 				stationaryHistory = stationaryHistory[1:]
 			}
-			if len(stationaryHistory) == 12 {
+			if len(stationaryHistory) == 14 {
 				minD, maxD := stationaryHistory[0], stationaryHistory[0]
 				for _, d := range stationaryHistory {
 					if d < minD {
@@ -196,12 +211,12 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			}
 		}
 
-		// 4. VOLUME CONTROL ENGINE:
+		// 3. VOLUME CONTROL ENGINE:
 		if dist >= volumeMinDist && dist <= volumeMaxDist {
 			if !volumeModeActive {
 				// PHASE A: DWELL DELAY BEFORE ACTIVATING
-				// Hand must enter volume zone and remain relatively steady for activationDwellMs
-				if dwellStartTime.IsZero() || absDiff(dist, dwellAnchorDist) > 25 {
+				// Hand must enter volume zone and remain relatively steady (+/- 35mm) for 280ms
+				if dwellStartTime.IsZero() || absDiff(dist, dwellAnchorDist) > 35 {
 					dwellAnchorDist = dist
 					dwellStartTime = time.Now()
 				} else if time.Since(dwellStartTime) >= activationDwellMs*time.Millisecond {
@@ -209,7 +224,7 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 					volumeModeActive = true
 					anchorDist = dist
 
-					currentVol := 15
+					currentVol := 30
 					if cb.GetVolume != nil {
 						currentVol = cb.GetVolume()
 					}

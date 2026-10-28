@@ -14,29 +14,23 @@ import (
 )
 
 type AudioPlayer struct {
-	mu           sync.Mutex
-	currentCmd   *exec.Cmd
-	volume       int
-	chimePath    string
-	cancelPath   string
-	volumePath   string
-	scaledChime  string
-	scaledCancel string
-	scaledVolume string
-	clickActive  int32
+	mu          sync.Mutex
+	currentCmd  *exec.Cmd
+	volume      int
+	chimePath   string
+	cancelPath  string
+	volumePath  string
+	clickActive int32
 }
 
 func NewAudioPlayer(cfg *Config) *AudioPlayer {
 	ap := &AudioPlayer{
-		volume:       cfg.DefaultVolume,
-		chimePath:    cfg.ChimeSound,
-		cancelPath:   cfg.CancelSound,
-		volumePath:   cfg.VolumeSound,
-		scaledChime:  "/tmp/chime_scaled.wav",
-		scaledCancel: "/tmp/cancel_scaled.wav",
-		scaledVolume: "/tmp/volume_scaled.wav",
+		volume:     cfg.DefaultVolume,
+		chimePath:  cfg.ChimeSound,
+		cancelPath: cfg.CancelSound,
+		volumePath: cfg.VolumeSound,
 	}
-	// Enable CS8571E amplifier (tinymix 176 0 -> gpio-413 out hi -> AMPLIFIER POWER ON)
+	// Enable CS8571E amplifier & set unmuted
 	_ = exec.Command("/bin/tinymix", "-D", "0", "set", "176", "0").Run()
 	ap.SetVolume(cfg.DefaultVolume)
 	return ap
@@ -52,50 +46,22 @@ func (ap *AudioPlayer) SetVolume(vol int) {
 	}
 	ap.volume = vol
 
-	// Safe analog master floor mapping for CS8571E hardware amplifier
-	var val int
-	if vol <= 30 {
-		val = 1
-	} else if vol <= 70 {
-		val = 2
-	} else {
-		val = 3
+	// Map 5..100% to ALSA Master volume (range 0..32)
+	// Factory mapping: 10% -> 3/32, 30% -> 9/32, 50% -> 15/32, 100% -> 30/32
+	masterVal := (vol * 30) / 100
+	if masterVal < 3 {
+		masterVal = 3
+	}
+	if masterVal > 30 {
+		masterVal = 30
 	}
 	ap.mu.Unlock()
 
-	// Update hardware mixer in background or quickly without blocking ToF
-	go func(targetVal, currentVol int) {
+	go func(targetVal int) {
+		_ = exec.Command("/bin/tinymix", "-D", "0", "set", "176", "0").Run()
 		_ = exec.Command("/bin/tinymix", "-D", "0", "set", "177", fmt.Sprintf("%d", targetVal), fmt.Sprintf("%d", targetVal)).Run()
-		// Pre-scale sound effects asynchronously so disk I/O never causes UI lag
-		ap.rescaleWAV(ap.chimePath, ap.scaledChime, currentVol)
-		ap.rescaleWAV(ap.cancelPath, ap.scaledCancel, currentVol)
-		ap.rescaleWAV(ap.volumePath, ap.scaledVolume, currentVol)
-	}(val, vol)
-}
-
-func (ap *AudioPlayer) rescaleWAV(srcPath, dstPath string, vol int) {
-	data, err := os.ReadFile(srcPath)
-	if err != nil || len(data) <= 44 {
-		return
-	}
-
-	scaled := make([]byte, len(data))
-	copy(scaled, data)
-
-	dataIdx := bytes.Index(scaled, []byte("data"))
-	if dataIdx == -1 || dataIdx+8 >= len(scaled) {
-		return
-	}
-	pcmStart := dataIdx + 8
-
-	scale := float64(vol) / 100.0
-	for i := pcmStart; i+1 < len(scaled); i += 2 {
-		sample := int16(binary.LittleEndian.Uint16(scaled[i : i+2]))
-		newSample := int16(float64(sample) * scale)
-		binary.LittleEndian.PutUint16(scaled[i:i+2], uint16(newSample))
-	}
-
-	_ = os.WriteFile(dstPath, scaled, 0644)
+		log.Printf("[Player] Volume set to %d%% (Master ALSA: %d/32)", vol, targetVal)
+	}(masterVal)
 }
 
 func (ap *AudioPlayer) GetVolume() int {
@@ -108,7 +74,7 @@ func (ap *AudioPlayer) Mute() {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
 	_ = exec.Command("/bin/tinymix", "-D", "0", "set", "176", "1").Run()
-	log.Println("[Player] Hardware speaker muted (CS8571E shutdown)")
+	log.Println("[Player] Hardware speaker muted")
 }
 
 func (ap *AudioPlayer) Unmute() {
@@ -221,22 +187,14 @@ func (ap *AudioPlayer) PlayWithVU(filePath string, onFrameVU func(byte)) error {
 }
 
 func (ap *AudioPlayer) PlayChime() {
-	target := ap.scaledChime
-	if _, err := os.Stat(target); err != nil {
-		target = ap.chimePath
-	}
-	if _, err := os.Stat(target); err == nil {
-		_ = ap.Play(target)
+	if _, err := os.Stat(ap.chimePath); err == nil {
+		_ = ap.Play(ap.chimePath)
 	}
 }
 
 func (ap *AudioPlayer) PlayCancel() {
-	target := ap.scaledCancel
-	if _, err := os.Stat(target); err != nil {
-		target = ap.cancelPath
-	}
-	if _, err := os.Stat(target); err == nil {
-		_ = ap.Play(target)
+	if _, err := os.Stat(ap.cancelPath); err == nil {
+		_ = ap.Play(ap.cancelPath)
 	}
 }
 
@@ -248,12 +206,8 @@ func (ap *AudioPlayer) PlayVolumeClick() {
 
 	go func() {
 		defer atomic.StoreInt32(&ap.clickActive, 0)
-		target := ap.scaledVolume
-		if _, err := os.Stat(target); err != nil {
-			target = ap.volumePath
-		}
-		if _, err := os.Stat(target); err == nil {
-			_ = exec.Command("/bin/tinyplay", target, "-D", "0", "-d", "0").Run()
+		if _, err := os.Stat(ap.volumePath); err == nil {
+			_ = exec.Command("/bin/tinyplay", ap.volumePath, "-D", "0", "-d", "0").Run()
 		}
 	}()
 }

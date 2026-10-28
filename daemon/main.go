@@ -58,7 +58,7 @@ func main() {
 
 	tofCallbacks := ToFCallbacks{
 		OnPalmCover: func() {
-			log.Println("[Gesture] Hand over sensor detected (<42mm) -> STOP EVERYTHING TO STANDBY!")
+			log.Println("[Gesture] Hand over sensor detected (<45mm) -> STOP EVERYTHING TO STANDBY!")
 			mu.Lock()
 			if activeCancel != nil {
 				activeCancel()
@@ -111,7 +111,7 @@ func main() {
 
 	// Visual and acoustic confirmation on startup:
 	// 1. Purple ring pulse for 1s
-	// 2. Authentic startup chime
+	// 2. Unmute hardware amp & play authentic startup chime
 	go leds.StartupFlash()
 	audio.SetPaused(true)
 	player.Unmute()
@@ -267,7 +267,6 @@ func main() {
 
 				followWav, err := audio.RecordSpeechWithVAD(5500*time.Millisecond, cancelRecord)
 				if err != nil || len(followWav) == 0 || ctx.Err() != nil {
-					// Follow-up timeout / no speech: play stop chime whenever it stops listening!
 					if ctx.Err() == nil {
 						player.PlayCancel()
 					}
