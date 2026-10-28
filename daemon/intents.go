@@ -92,14 +92,7 @@ func (ie *IntentEngine) TryHandle(text string) (IntentResult, error) {
 	}
 
 	// 4. Playback / Stop / Dismissal Commands
-	if norm == "стоп" || norm == "хватит" || norm == "пауза" || norm == "останови" ||
-		norm == "замолчи" || norm == "выключись" || norm == "тихо" || norm == "молчи" ||
-		norm == "отмена" || norm == "прекрати" || norm == "спасибо" || norm == "все спасибо" ||
-		norm == "пока" || norm == "все" || norm == "отбой" || norm == "выключи" || norm == "и выключи" ||
-		norm == "stop" || norm == "cancel" ||
-		strings.Contains(norm, "останови музыку") || strings.Contains(norm, "выключи музыку") ||
-		strings.Contains(norm, "поставь на паузу") || strings.Contains(norm, "хватит болтать") ||
-		strings.Contains(norm, "выключи колонку") {
+	if IsStopCommand(norm) {
 		ie.player.Stop()
 		ie.player.PlayCancel()
 		ie.leds.SetMode(ModeIdle)
@@ -194,3 +187,30 @@ func (ie *IntentEngine) checkVolume(norm string) (bool, int) {
 }
 
 
+
+
+var stopWordsRegex = regexp.MustCompile(`(?i)\b(стоп|хватит|замолчи|прекрати|отмена|отбой|выключись|молчи|тихо|остановись|останови|пауза|пока|отстань|помолчи|выключи|stop|cancel|quit|enough)\b`)
+
+func IsStopCommand(text string) bool {
+	norm := strings.ToLower(strings.TrimSpace(text))
+	norm = strings.Trim(norm, " .,!?;:-_«»\"'…")
+	if norm == "" {
+		return false
+	}
+
+	// Conversational closings / thank-yous
+	if norm == "спасибо" || norm == "все спасибо" || norm == "всё спасибо" ||
+		norm == "все" || norm == "всё" || norm == "пока" || norm == "до свидания" ||
+		norm == "спасибо пока" || norm == "ладно пока" || norm == "ну пока" ||
+		norm == "спасибо хватит" || norm == "ладно спасибо" || norm == "давай пока" ||
+		norm == "все давай" || norm == "всё давай" || norm == "хватит болтать" {
+		return true
+	}
+
+	// Any explicit stop word anywhere in the phrase
+	if stopWordsRegex.MatchString(norm) {
+		return true
+	}
+
+	return false
+}

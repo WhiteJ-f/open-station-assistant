@@ -18,6 +18,7 @@ type Config struct {
 	ChimeSound         string   `json:"chime_sound"`
 	CancelSound        string   `json:"cancel_sound"`
 	VolumeSound        string   `json:"volume_sound"`
+	StartupSound       string   `json:"startup_sound"`
 	WakeWords          []string `json:"wake_words"`
 	LocalWakeWordModel string   `json:"local_wakeword_model"`
 	WakeWordThreshold  float64  `json:"wakeword_threshold"`
@@ -42,6 +43,7 @@ func DefaultConfig() *Config {
 		ChimeSound:          "/bkupgrade/data/chime.wav",
 		CancelSound:         "/bkupgrade/data/cancel.wav",
 		VolumeSound:         "/bkupgrade/data/volume.wav",
+		StartupSound:        "/bkupgrade/data/startup.wav",
 		WakeWords:           []string{"алиса", "яндекс"},
 		LocalWakeWordModel:  "alexa,jarvis",
 		WakeWordThreshold:   0.20,

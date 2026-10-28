@@ -91,6 +91,9 @@ func main() {
 			leds.ShowVolume(vol)
 			player.PlayVolumeClick()
 		},
+		OnVolumeHold: func(vol int) {
+			leds.ShowVolume(vol)
+		},
 		OnHoverWake: func() {
 			select {
 			case hoverWakeChan <- struct{}{}:
@@ -115,7 +118,7 @@ func main() {
 	go leds.StartupFlash()
 	audio.SetPaused(true)
 	player.Unmute()
-	player.PlayChime()
+	player.PlayStartup()
 	time.Sleep(300 * time.Millisecond)
 	audio.SetPaused(false)
 	log.Println("[Daemon] System ready. Listening locally for wake words (zero cloud traffic)...")
@@ -159,13 +162,10 @@ func main() {
 				mu.Unlock()
 			}()
 
-			// 1. INSTANT CHIME (<50ms): Authentic "Ту-дум!" rings immediately!
+			// 1. Wake word detected: Switch LED to listening mode and record user speech
+			// (Chime is NOT played on wake word - only when speech finishes and data streams to cloud)
 			audio.SetPaused(true)
 			spotter.Reset()
-			player.PlayChime()
-			time.Sleep(50 * time.Millisecond)
-
-			// 2. Set LED to listening mode and record user's question with VAD
 			leds.SetMode(ModeListening)
 			audio.SetPaused(false)
 
@@ -180,16 +180,17 @@ func main() {
 				return
 			}
 
-			// 3. Pause audio during network processing and response playback
+			// 2. Speech captured! Ring acknowledgment chime right as it starts streaming to cloud:
+			player.PlayChime()
 			audio.SetPaused(true)
 			spotter.Reset()
 			leds.SetMode(ModeThinking)
 
-			// 4. Send recorded question to Groq Whisper STT
+			// 3. Send recorded question to Groq Whisper STT
 			query, err := ai.Transcribe(questionWav)
 			if err != nil || strings.TrimSpace(query) == "" || ctx.Err() != nil {
 				if ctx.Err() == nil {
-					// Empty speech / recognition failure: play stop chime!
+					// Recognition failure / empty audio: play stop chime
 					player.PlayCancel()
 				}
 				leds.SetMode(ModeIdle)
@@ -199,7 +200,17 @@ func main() {
 
 			log.Printf("[User Query] \"%s\"", query)
 
-			// 5. Check deterministic local intent first (Time, Date, Volume, Playback, Weather)
+			// Check for local stop words IMMEDIATELY before sending to LLM!
+			if IsStopCommand(query) {
+				log.Printf("[Daemon] Local stop command detected (\"%s\") -> Dismissing locally without cloud LLM query.", query)
+				player.Stop()
+				player.PlayCancel()
+				leds.SetMode(ModeIdle)
+				audio.SetPaused(false)
+				return
+			}
+
+			// 4. Check deterministic local intent first (Time, Date, Volume, Playback, Weather)
 			intentRes, _ := intents.TryHandle(query)
 			if intentRes.Handled {
 				log.Printf("[Intent] Handled locally: %s -> Answer: \"%s\"", intentRes.Action, intentRes.Answer)
@@ -213,7 +224,7 @@ func main() {
 					speakAnswer(ctx, intentRes.Answer, leds, player, audio, tts)
 				}
 			} else {
-				// 6. Query Groq LLM (Qwen / Llama) for conversational answers
+				// 5. Query Groq LLM (Qwen / Llama) for conversational answers
 				leds.SetMode(ModeThinking)
 				llmResp, err := ai.AskLLM(query)
 				if err != nil || ctx.Err() != nil {
@@ -256,7 +267,7 @@ func main() {
 				return
 			}
 
-			// 7. Continuous Conversation: Listen for follow-up questions for 5.5 seconds!
+			// 6. Continuous Conversation: Listen for follow-up questions for 5.5 seconds!
 			for followUp := 0; followUp < 2; followUp++ {
 				if ctx.Err() != nil {
 					break
@@ -273,7 +284,12 @@ func main() {
 					break
 				}
 
+				// Speech captured in follow-up! Play chime right as it starts streaming to cloud:
+				player.PlayChime()
+				audio.SetPaused(true)
+				spotter.Reset()
 				leds.SetMode(ModeThinking)
+
 				followQuery, err := ai.Transcribe(followWav)
 				if err != nil || strings.TrimSpace(followQuery) == "" || ctx.Err() != nil {
 					if ctx.Err() == nil {
@@ -283,11 +299,11 @@ func main() {
 				}
 				log.Printf("[Follow-Up] \"%s\"", followQuery)
 
-				normFollow := strings.ToLower(strings.Trim(followQuery, " .,!?;:-_«»\"'…"))
-				if normFollow == "стоп" || normFollow == "хватит" || normFollow == "спасибо" ||
-					normFollow == "отмена" || normFollow == "пока" || normFollow == "все" ||
-					normFollow == "отбой" || normFollow == "все спасибо" ||
-					normFollow == "stop" || normFollow == "cancel" {
+				// LOCAL STOP WORDS CHECK IN CONVERSATION:
+				// Do not send anywhere. Just stop.
+				if IsStopCommand(followQuery) {
+					log.Printf("[Follow-Up] Local stop word detected (\"%s\") -> Ending conversation locally without cloud LLM query.", followQuery)
+					player.Stop()
 					player.PlayCancel()
 					break
 				}

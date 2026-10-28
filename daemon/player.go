@@ -20,6 +20,7 @@ type AudioPlayer struct {
 	chimePath   string
 	cancelPath  string
 	volumePath  string
+	startupPath string
 	clickActive int32
 }
 
@@ -28,7 +29,8 @@ func NewAudioPlayer(cfg *Config) *AudioPlayer {
 		volume:     cfg.DefaultVolume,
 		chimePath:  cfg.ChimeSound,
 		cancelPath: cfg.CancelSound,
-		volumePath: cfg.VolumeSound,
+		volumePath:  cfg.VolumeSound,
+		startupPath: cfg.StartupSound,
 	}
 	// Enable CS8571E amplifier & set unmuted
 	_ = exec.Command("/bin/tinymix", "-D", "0", "set", "176", "0").Run()
@@ -210,4 +212,10 @@ func (ap *AudioPlayer) PlayVolumeClick() {
 			_ = exec.Command("/bin/tinyplay", ap.volumePath, "-D", "0", "-d", "0").Run()
 		}
 	}()
+}
+
+func (ap *AudioPlayer) PlayStartup() {
+	if _, err := os.Stat(ap.startupPath); err == nil {
+		_ = ap.Play(ap.startupPath)
+	}
 }
