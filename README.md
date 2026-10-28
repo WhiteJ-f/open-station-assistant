@@ -146,7 +146,7 @@ Copy `config.example.json` to `/bkupgrade/data/config.json` on the device and po
   "wake_words": ["jarvis", "alexa"],
   "local_wakeword_model": "alexa,jarvis",
   "wakeword_threshold": 0.20,
-  "sensor_enabled": true,
+  "sensor_enabled": false,
   "city": "Moscow",
   "latitude": 55.7558,
   "longitude": 37.6173,
@@ -161,6 +161,44 @@ Copy `config.example.json` to `/bkupgrade/data/config.json` on the device and po
 In regions where cloud AI endpoints require proxy routing, you can run a local proxy client (e.g. `sing-box`, `byedpi`, or custom tunnels using protocols such as VLESS, SOCKS5, or Shadowsocks) bound to `127.0.0.1:1080`. 
 
 The Go daemon automatically checks for a local SOCKS5 proxy on `127.0.0.1:1080` and routes outbound HTTPS traffic through it transparently if available.
+
+---
+
+### Configuration Reference
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `groq_api_key` | string | — | Your Groq API key |
+| `groq_base_url` | string | `https://api.groq.com/openai/v1` | Groq API base URL |
+| `stt_model` | string | `whisper-large-v3-turbo` | Groq Whisper model for speech recognition |
+| `llm_model` | string | `qwen/qwen3.8-27b` | Groq LLM model for conversational answers |
+| `tts_voice` | string | `Anna` | RHVoice voice for on-device TTS |
+| `default_volume` | int | `15` | Initial volume level (5–100) |
+| `chime_sound` | string | `/bkupgrade/data/chime.wav` | Short ascending chime played when data streams to cloud |
+| `cancel_sound` | string | `/bkupgrade/data/cancel.wav` | Descending cancel chime played when listening ends |
+| `volume_sound` | string | `/bkupgrade/data/volume.wav` | Click chime per volume step during ToF adjustment |
+| `startup_sound` | string | `/bkupgrade/data/startup.wav` | Startup jingle played on daemon boot |
+| `local_wakeword_model` | string | `alexa,jarvis` | Wake word model names (comma-separated) |
+| `wakeword_threshold` | float | `0.20` | Detection sensitivity (lower = more sensitive) |
+| `sensor_enabled` | bool | **`false`** | Enable ST VL53L0X ToF laser gesture sensor. **Disabled by default.** See note below. |
+| `city` | string | `Moscow` | City name for weather queries |
+| `latitude` / `longitude` | float | `55.7558` / `37.6173` | Coordinates for Open-Meteo weather API |
+| `timezone_offset_hours` | int | `3` | UTC offset for time queries |
+| `byedpi_enabled` | bool | `false` | Enable local byedpi/sing-box proxy routing on `127.0.0.1:1080` |
+| `byedpi_port` | int | `1080` | Local SOCKS5 proxy port |
+
+> [!NOTE]
+> **ToF Gesture Sensor (`sensor_enabled`)**
+>
+> The ST VL53L0X time-of-flight sensor enables hand gesture volume control and palm-cover stop. It is **disabled by default** because it requires the `/usr/bin/vl53l0x_ctrl` kernel driver binary present on the Yandex Station Mini 1 — it is not available on other hardware.
+>
+> When enabled, the sensor runs a background worker that:
+> - Waits for a hand held **65–340 mm** above the speaker for **280 ms** (dwell activation), then activates a discrete 10-step volume arc shown on the LED ring.
+> - Moves hand **up** = volume up, **down** = volume down, one LED arc step (~20 mm travel) per volume level; each step sounds a click.
+> - Stationary objects (ceiling, shelves) held motionless for >6 s are automatically classified as background and ignored.
+> - Covering the sensor with a flat palm (**< 45 mm**) instantly stops any active speech, music, or LLM stream, sounds the cancel chime, and returns to standby listening.
+>
+> To enable on a compatible device, set `"sensor_enabled": true` in `config.json`.
 
 ---
 

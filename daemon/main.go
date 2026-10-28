@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,6 +103,9 @@ func main() {
 		},
 	}
 
+	if !cfg.SensorEnabled {
+		_ = exec.Command("killall", "vl53l0x_ctrl").Run()
+	}
 	tof := NewToFManager(tofCallbacks, cfg.SensorEnabled)
 	defer tof.Close()
 
@@ -162,10 +166,11 @@ func main() {
 				mu.Unlock()
 			}()
 
-			// 1. Wake word detected: Switch LED to listening mode and record user speech
-			// (Chime is NOT played on wake word - only when speech finishes and data streams to cloud)
+			// 1. Wake word detected: Chime activates anytime it starts to listen!
 			audio.SetPaused(true)
 			spotter.Reset()
+			player.PlayChime()
+			time.Sleep(60 * time.Millisecond)
 			leds.SetMode(ModeListening)
 			audio.SetPaused(false)
 

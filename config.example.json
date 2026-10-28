@@ -14,7 +14,7 @@
   "wake_words": ["jarvis", "alexa"],
   "local_wakeword_model": "alexa,jarvis",
   "wakeword_threshold": 0.20,
-  "sensor_enabled": true,
+  "sensor_enabled": false,
   "city": "Moscow",
   "latitude": 55.7558,
   "longitude": 37.6173,
