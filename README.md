@@ -68,9 +68,22 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
    - Built-in 150 Hz IIR High-Pass Filter ($\alpha = 0.9807$) eliminates ambient room rumble and fan hum.
    - Calibrated +21.6 dB ($12.0\times$) digital preamp staging ensures acoustic features match openWakeWord's training distribution from across the room.
 
-5. **Hardware Peripheral Drivers**:
-   - **LED Ring**: Direct I2C control of the onboard NXP TLC59116 16-channel LED driver on `i2c-0` (`0x68`) with smooth state animations (idle, listening, thinking, speaking).
-   - **Time-of-Flight Gesture Sensor**: STMicroelectronics VL53L0X laser distance sensor on `/dev/input/event0` for proximity and hover volume gestures.
+5. **Hardware Peripheral Drivers & Gestures**:
+   - **LED Ring**: Direct I2C driver on `/dev/i2c-0` (`0x3c`) controlling the 12 RGB LEDs (36 PWM channels):
+     - *Standby (Idle)*: Completely OFF (0% light/power).
+     - *Listening*: Smooth sinusoidal breathing purple (2.0s period).
+     - *Thinking*: Rotating cyan-blue dot with a 4-LED decaying trail.
+     - *Speaking*: Dynamic voice VU meter pulsing brightness in sync with speech waveforms.
+     - *Volume Adjustment*: Proportional radial arc (1–12 LEDs) with continuous gradient shifting (Cyan $\to$ Green $\to$ Orange $\to$ Crimson).
+   - **Intelligent ToF Gestures (ST VL53L0X)**:
+     - *Relative Height Volume*: Dwell activation anchor; raising hand increases volume, lowering hand decreases volume, with an audio click chime after each step.
+     - *Stationary Obstacle Rejection*: Static surfaces (shelves, ceilings, resting obstacles with $\le 16$mm variance for $> 900$ms) are automatically identified and ignored as background.
+     - *Palm Stop*: Covering the sensor ($< 38$mm) immediately stops playback, sounds the cancel chime, and returns directly to standby wake-word listening without muting.
+
+6. **Continuous Conversation (Follow-Up Mode)**:
+   - After answering a question, the assistant stays in active follow-up listening mode for 5.5 seconds (breathing purple LED).
+   - You can speak follow-up inquiries naturally without repeating the wake word.
+   - Saying *"Спасибо"*, *"Стоп"*, or allowing the timeout to expire smoothly returns the unit to standby.
 
 ---
 

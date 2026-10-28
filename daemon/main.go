@@ -72,7 +72,7 @@ func main() {
 		OnVolumeChange: func(vol int) {
 			player.SetVolume(vol)
 			leds.ShowVolume(vol)
-			player.PlayVolumeClick()
+			go player.PlayVolumeClick()
 		},
 		OnHoverWake: func() {
 			select {

@@ -1,14 +1,13 @@
 package main
 
 import (
+	"log"
 	"math"
 	"os"
 	"sync"
 	"syscall"
 	"time"
 )
-
-const I2C_SLAVE_FORCE = 0x0706
 
 type LEDMode int
 
@@ -39,7 +38,7 @@ func NewLEDManager() *LEDManager {
 		currentMode:     ModeIdle,
 		lastMode:        ModeIdle,
 		volumeLevel:     15,
-		voiceBrightness: 6,
+		voiceBrightness: 12,
 		stopChan:        make(chan struct{}),
 	}
 	lm.initHardware()
@@ -48,25 +47,35 @@ func NewLEDManager() *LEDManager {
 }
 
 func (lm *LEDManager) initHardware() {
-	f, err := os.OpenFile("/dev/i2c-0", os.O_RDWR, 0)
-	if err != nil {
+	fd, e := syscall.Open("/dev/i2c-0", syscall.O_RDWR|syscall.O_CLOEXEC, 0)
+	if e != nil {
+		log.Printf("[LED] Failed to open /dev/i2c-0: %v", e)
 		return
 	}
-	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, f.Fd(), I2C_SLAVE_FORCE, uintptr(0x3c))
-	if errno != 0 {
-		f.Close()
+	if _, _, err := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), 0x0703, 0x3c); err != 0 {
+		log.Printf("[LED] IOCTL 0x0703 to 0x3c failed: %v", err)
+		_ = syscall.Close(fd)
 		return
 	}
-	lm.i2cFile = f
+	lm.i2cFile = os.NewFile(uintptr(fd), "/dev/i2c-0")
 
-	// Enable chip: reg 0x00 -> 0x01
-	_, _ = lm.i2cFile.Write([]byte{0x00, 0x01})
+	// Chip initialization (from hardware driver ring_linux.go):
+	// 1. Enable chip: reg 0x00 -> 0x01
+	_ = lm.writeReg(0x00, 0x01)
 
-	// Enable all 36 channel control registers (0x26 - 0x49)
-	for ch := 1; ch <= 36; ch++ {
-		reg := byte(0x25 + ch)
-		_, _ = lm.i2cFile.Write([]byte{reg, 0x03})
+	// 2. Enable output state registers for all 36 channels (regs 0x26 - 0x49 -> 0x03)
+	for ch := byte(1); ch <= 36; ch++ {
+		_ = lm.writeReg(0x25+ch, 0x03)
 	}
+	log.Println("[LED] Hardware initialized successfully on /dev/i2c-0 (addr 0x3c, 12 RGB LEDs)")
+}
+
+func (lm *LEDManager) writeReg(reg, val byte) error {
+	if lm.i2cFile == nil {
+		return nil
+	}
+	_, err := lm.i2cFile.Write([]byte{reg, val})
+	return err
 }
 
 func (lm *LEDManager) SetMode(mode LEDMode) {
@@ -81,11 +90,11 @@ func (lm *LEDManager) SetMode(mode LEDMode) {
 func (lm *LEDManager) SetVoiceBrightness(level byte) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
-	if level < 4 {
-		level = 4
+	if level < 6 {
+		level = 6
 	}
-	if level > 55 {
-		level = 55
+	if level > 60 {
+		level = 60
 	}
 	lm.voiceBrightness = level
 }
@@ -113,17 +122,25 @@ func (lm *LEDManager) writeLEDs(colors [12][3]byte) {
 		return
 	}
 
+	// 12 RGB LEDs = 36 channels
+	// In Yandex Station Mini hardware:
+	// For LED i (0..11):
+	// Channel (i*3 + 1): Blue
+	// Channel (i*3 + 2): Green
+	// Channel (i*3 + 3): Red
 	for i := 0; i < 12; i++ {
 		chB := byte(i*3 + 1)
 		chG := byte(i*3 + 2)
 		chR := byte(i*3 + 3)
 
-		_, _ = lm.i2cFile.Write([]byte{chB, colors[i][2]})
-		_, _ = lm.i2cFile.Write([]byte{chG, colors[i][1]})
-		_, _ = lm.i2cFile.Write([]byte{chR, colors[i][0]})
+		_ = lm.writeReg(chB, colors[i][2]) // Blue PWM
+		_ = lm.writeReg(chG, colors[i][1]) // Green PWM
+		_ = lm.writeReg(chR, colors[i][0]) // Red PWM
 	}
-	// Commit update: reg 0x25 = 0
-	_, _ = lm.i2cFile.Write([]byte{0x25, 0x00})
+
+	// CRITICAL: Must trigger PWM latch (0x4a) then commit update (0x25)
+	_ = lm.writeReg(0x4a, 0x00)
+	_ = lm.writeReg(0x25, 0x00)
 }
 
 // getVolumeColor returns smooth gradient color (Cyan -> Green -> Orange -> Crimson) based on volume (0..100)
@@ -132,22 +149,22 @@ func getVolumeColor(vol int) [3]byte {
 		// 0..30%: Cyan / Deep Teal -> Green
 		t := float64(vol) / 30.0
 		r := byte(0)
-		g := byte(25.0 + t*25.0)
-		b := byte(55.0 * (1.0 - t))
+		g := byte(30.0 + t*25.0)
+		b := byte(65.0 * (1.0 - t))
 		return [3]byte{r, g, b}
 	} else if vol < 70 {
 		// 30..70%: Green -> Amber / Warm Orange
 		t := float64(vol-30) / 40.0
-		r := byte(t * 50.0)
-		g := byte(50.0 - t*20.0)
+		r := byte(t * 60.0)
+		g := byte(55.0 - t*20.0)
 		b := byte(0)
 		return [3]byte{r, g, b}
 	} else {
 		// 70..100%: Orange -> Crimson Red
 		t := float64(vol-70) / 30.0
-		r := byte(50.0 + t*15.0)
-		g := byte(30.0 * (1.0 - t))
-		b := byte(t * 6.0)
+		r := byte(60.0 + t*20.0)
+		g := byte(35.0 * (1.0 - t))
+		b := byte(t * 8.0)
 		return [3]byte{r, g, b}
 	}
 }
@@ -173,44 +190,44 @@ func (lm *LEDManager) animationLoop() {
 
 			switch mode {
 			case ModeOff, ModeIdle:
-				// 1. Off when standby (clean zero power / black)
+				// Standby: Completely OFF (zero power)
 				lm.writeLEDs(colors)
 
 			case ModeListening:
-				// 2. Breathing purple when listening (smooth sinusoidal pulsation)
+				// Breathing purple when listening (smooth sinusoidal pulsation)
 				phase := float64(step%28) / 28.0 * 2.0 * math.Pi
 				intensity := (math.Sin(phase) + 1.0) / 2.0
-				pulse := byte(6.0 + intensity*34.0)
-				r := byte(float64(pulse) * 0.65)
+				pulse := byte(8.0 + intensity*40.0)
+				r := byte(float64(pulse) * 0.70)
 				for i := 0; i < 12; i++ {
 					colors[i] = [3]byte{r, 0, pulse}
 				}
 				lm.writeLEDs(colors)
 
 			case ModeThinking:
-				// 3. Spinning blue when processing (fluid rotation with fading trail)
+				// Spinning blue when processing
 				head := step % 12
 				tail1 := (head + 11) % 12
 				tail2 := (head + 10) % 12
 				tail3 := (head + 9) % 12
 				tail4 := (head + 8) % 12
-				colors[head] = [3]byte{0, 20, 65}
-				colors[tail1] = [3]byte{0, 10, 35}
-				colors[tail2] = [3]byte{0, 4, 18}
-				colors[tail3] = [3]byte{0, 1, 8}
-				colors[tail4] = [3]byte{0, 0, 3}
+				colors[head] = [3]byte{0, 30, 80}
+				colors[tail1] = [3]byte{0, 15, 45}
+				colors[tail2] = [3]byte{0, 6, 22}
+				colors[tail3] = [3]byte{0, 2, 10}
+				colors[tail4] = [3]byte{0, 0, 4}
 				lm.writeLEDs(colors)
 
 			case ModeSpeaking:
-				// 4. Dynamic voice-based purple: brightness dynamically driven by speech amplitude
-				r := byte(float64(voiceB) * 0.65)
+				// Dynamic voice-based purple
+				r := byte(float64(voiceB) * 0.70)
 				for i := 0; i < 12; i++ {
 					colors[i] = [3]byte{r, 0, voiceB}
 				}
 				lm.writeLEDs(colors)
 
 			case ModeVolume:
-				// 5. Original-alike volume arc with dynamic color gradient
+				// Original-alike volume arc with dynamic color gradient
 				numLEDs := int(math.Round(float64(vol) * 12.0 / 100.0))
 				if numLEDs < 1 && vol > 0 {
 					numLEDs = 1
@@ -227,12 +244,11 @@ func (lm *LEDManager) animationLoop() {
 				lm.writeLEDs(colors)
 
 			case ModeMusic:
-				// 6. Visualizer for music playback: animated multi-color EQ wave
+				// Visualizer for music playback
 				for i := 0; i < 12; i++ {
 					phase := float64(step*3+i*2) * 0.25
 					intensity := (math.Sin(phase) + 1.0) / 2.0
-					b := byte(8.0 + intensity*40.0)
-					// Vibrant audio visualizer: rotates between cyan, magenta, and amber
+					b := byte(10.0 + intensity*45.0)
 					switch (i + step/4) % 3 {
 					case 0:
 						colors[i] = [3]byte{0, byte(float64(b) * 0.7), b}
@@ -245,9 +261,9 @@ func (lm *LEDManager) animationLoop() {
 				lm.writeLEDs(colors)
 
 			case ModeMute:
-				// 7. Red when muted
+				// Red when muted
 				for i := 0; i < 12; i++ {
-					colors[i] = [3]byte{45, 0, 0}
+					colors[i] = [3]byte{55, 0, 0}
 				}
 				lm.writeLEDs(colors)
 			}
@@ -260,6 +276,6 @@ func (lm *LEDManager) Close() {
 	var colors [12][3]byte
 	lm.writeLEDs(colors)
 	if lm.i2cFile != nil {
-		lm.i2cFile.Close()
+		_ = lm.i2cFile.Close()
 	}
 }

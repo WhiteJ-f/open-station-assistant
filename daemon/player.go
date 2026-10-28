@@ -253,6 +253,6 @@ func (ap *AudioPlayer) PlayVolumeClick() {
 		target = ap.volumePath
 	}
 	if _, err := os.Stat(target); err == nil {
-		_ = ap.Play(target)
+		_ = exec.Command("/bin/tinyplay", target, "-D", "0", "-d", "0").Run()
 	}
 }

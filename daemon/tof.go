@@ -35,7 +35,7 @@ func NewToFManager(callbacks ToFCallbacks, enabled bool) *ToFManager {
 		return tm
 	}
 
-	log.Println("[ToF] Starting intelligent VL53L0X ranging monitor (relative volume + palm stop)...")
+	log.Println("[ToF] Starting intelligent VL53L0X ranging monitor (robust stationary rejection + relative volume)...")
 	go tm.monitorWorker(callbacks)
 	return tm
 }
@@ -63,8 +63,8 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 	const (
 		palmMuteMaxDist = 38  // < 38mm hand directly over sensor
 		sliderMinDist   = 55  // 55mm
-		sliderMaxDist   = 300 // 300mm
-		maxValidDist    = 380 // > 380mm considered empty room / out of reach
+		sliderMaxDist   = 320 // 320mm
+		maxValidDist    = 400 // > 400mm considered empty room / out of reach
 		activationDwell = 4   // ~280ms dwell before entering volume mode
 	)
 
@@ -78,8 +78,9 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 
 	// Stationary object rejection tracking
 	var history []int
-	const historySize = 16 // ~1.1 seconds of samples
-	var ignoredBaseline int = -1
+	const historySize = 12 // ~840ms rolling window
+	var ignoredMin int = -1
+	var ignoredMax int = -1
 	var stationarySince time.Time
 
 	for scanner.Scan() {
@@ -113,20 +114,25 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			}
 			history = nil
 			stationarySince = time.Time{}
+			// Clear ignored baseline when sensor sees completely open air
+			if ignoredMin > 0 {
+				ignoredMin = -1
+				ignoredMax = -1
+			}
 			continue
 		}
 
-		// Check against ignored stationary baseline (e.g. shelf or ceiling)
-		if ignoredBaseline > 0 {
-			if absDiff(dist, ignoredBaseline) < 30 {
-				// Still near the stationary object, keep ignoring
-				continue
-			} else {
-				// Object moved significantly or was removed! Re-arm
-				log.Printf("[ToF] Obstacle moved (dist: %d vs baseline: %d). Sensor re-armed.", dist, ignoredBaseline)
-				ignoredBaseline = -1
-				history = nil
+		// Check against ignored stationary obstacle (e.g. low shelf, ceiling, or static object)
+		if ignoredMin > 0 && dist >= ignoredMin && dist <= ignoredMax {
+			// Object is within the ignored stationary zone: ignore completely!
+			palmCoverCount = 0
+			dwellCount = 0
+			if volumeModeActive {
+				volumeModeActive = false
+				anchorDist = -1
+				anchorVol = -1
 			}
+			continue
 		}
 
 		// 1. Palm cover / Hand over sensor: <38mm for 2 consecutive frames (~140ms)
@@ -148,7 +154,7 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			palmCoverCount = 0
 		}
 
-		// Track stationary variance
+		// Track stationary variance in a rolling window
 		history = append(history, dist)
 		if len(history) > historySize {
 			history = history[1:]
@@ -156,7 +162,6 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 
 		if len(history) == historySize {
 			minD, maxD := history[0], history[0]
-			sumD := 0
 			for _, d := range history {
 				if d < minD {
 					minD = d
@@ -164,20 +169,20 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 				if d > maxD {
 					maxD = d
 				}
-				sumD += d
 			}
 			variance := maxD - minD
-			if variance <= 14 {
+			if variance <= 16 {
 				if stationarySince.IsZero() {
 					stationarySince = time.Now()
-				} else if time.Since(stationarySince) > 1200*time.Millisecond {
-					// Stationary object detected for > 1.2s! Ignore it.
-					ignoredBaseline = sumD / len(history)
+				} else if time.Since(stationarySince) > 900*time.Millisecond {
+					// Stationary object detected for > 900ms! Ignore it as background.
+					ignoredMin = minD - 25
+					ignoredMax = maxD + 25
 					volumeModeActive = false
 					anchorDist = -1
 					anchorVol = -1
 					dwellCount = 0
-					log.Printf("[ToF] Stationary obstacle detected at %d mm -> Ignored as background.", ignoredBaseline)
+					log.Printf("[ToF] Stationary obstacle detected [%d..%d mm] -> Ignored as background.", ignoredMin, ignoredMax)
 					continue
 				}
 			} else {
@@ -205,7 +210,6 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 				// Hand is actively moving relative to initial anchor
 				// Moving hand UP (dist > anchorDist): volume increases
 				// Moving hand DOWN (dist < anchorDist): volume decreases
-				// Sensitivity: 250mm total stroke spans ~80% volume range (~3mm per 1% volume)
 				deltaDist := dist - anchorDist
 				deltaPct := (deltaDist * 80) / 200
 				newVol := anchorVol + deltaPct
@@ -216,7 +220,7 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 					newVol = 100
 				}
 
-				if absDiff(newVol, lastReportedVol) >= 4 && time.Since(lastVolChange) > 100*time.Millisecond {
+				if absDiff(newVol, lastReportedVol) >= 4 && time.Since(lastVolChange) > 120*time.Millisecond {
 					lastReportedVol = newVol
 					lastVolChange = time.Now()
 					if cb.OnVolumeChange != nil {
