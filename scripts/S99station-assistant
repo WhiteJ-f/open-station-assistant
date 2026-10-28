@@ -5,14 +5,12 @@
 case "$1" in
     start)
         echo "Starting open station-assistant services..."
-        # 1. Optional proxy (e.g. sing-box)
         if [ -x /bkupgrade/bin/sing-box ] && [ -f /bkupgrade/data/singbox.json ]; then
             killall sing-box 2>/dev/null
-            /bkupgrade/bin/sing-box run -c /bkupgrade/data/singbox.json </dev/null >/tmp/singbox.log 2>&1 &
+            nohup /bkupgrade/bin/sing-box run -c /bkupgrade/data/singbox.json >/tmp/singbox.log 2>&1 &
         fi
-        # 2. Main assistant daemon
         killall station-assistant 2>/dev/null
-        /bkupgrade/bin/station-assistant /bkupgrade/data/config.json </dev/null >/tmp/assistant.log 2>&1 &
+        nohup /bkupgrade/bin/station-assistant /bkupgrade/data/config.json >/tmp/assistant.log 2>&1 &
         ;;
     stop)
         echo "Stopping open station-assistant services..."
