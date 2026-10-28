@@ -15,10 +15,10 @@
 Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / Amlogic A113X SoC) into a fully open, autonomous smart speaker. It replaces proprietary cloud daemons with an independent on-device pipeline:
 
 ```
-[ MEMS Microphones (Ch 2+3) ]
+[ MEMS Microphones (Ch 0+1) ]
            │ (48kHz S16_LE)
            ▼
-[ 150Hz HPF + 12x Preamp ] ──► [ 16kHz Downsampler ]
+[ 150Hz HPF + 3.0x Preamp ] ──► [ 16kHz Downsampler ]
                                        │
                                        ▼
                      [ Rust openWakeWord Spotter (tract-onnx) ]
@@ -68,10 +68,10 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
    - Audio is upsampled linearly to 48kHz stereo to match the hardware DAC without popping or resampling distortion.
 
 4. **Calibrated MEMS Microphone Pipeline**:
-   - Hardware ALSA device `hw:0,2` provides 4 TDM slots. Slots 0 & 1 contain zero-padding, while Slots 2 & 3 are physical MEMS microphones.
-   - Real-time `(Ch2 + Ch3) / 2.0` averaging provides 360° pickup and +3 dB SNR gain.
+   - Hardware ALSA device `hw:0,2` provides 4 TDM slots. Channels 0 & 1 are the physical MEMS microphones, while Channels 2 & 3 are hardware decimator/reference lanes.
+   - Real-time `(Ch0 + Ch1) / 2.0` averaging provides 360° pickup and +3 dB SNR gain.
    - Built-in 150 Hz IIR High-Pass Filter ($\alpha = 0.9807$) eliminates ambient room rumble and fan hum.
-   - Calibrated +21.6 dB ($12.0\times$) digital preamp staging ensures acoustic features match openWakeWord's training distribution from across the room.
+   - Calibrated +9.5 dB ($3.0\times$) digital preamp staging ensures acoustic features match openWakeWord's training distribution from across the room without clipping or noise elevation.
 
 5. **Hardware Peripheral Drivers & Gestures**:
    - **LED Ring**: Direct I2C driver on `/dev/i2c-0` (`0x3c`) controlling the 12 RGB LEDs (36 PWM channels):
@@ -99,7 +99,7 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
 ```text
 ├── daemon/                     # Go Assistant Daemon
 │   ├── ai.go                   # Whisper STT & LLM chat completions
-│   ├── audio.go                # ALSA capture, 150Hz HPF, 12x preamp, VAD
+│   ├── audio.go                # ALSA capture, 150Hz HPF, 3x preamp, VAD
 │   ├── config.go               # Configuration structure & defaults
 │   ├── intents.go              # Intent router (weather, music, time, volume, stop)
 │   ├── led.go                  # TLC59116 I2C RGB ring controller
