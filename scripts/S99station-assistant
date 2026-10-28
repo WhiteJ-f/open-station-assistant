@@ -8,24 +8,31 @@
 # Short-Description: Open Yandex Station Mini Standalone Assistant Daemon
 ### END INIT INFO
 
+DAEMON_BIN="/bkupgrade/bin/station-assistant"
+DAEMON_CFG="/bkupgrade/data/config.json"
+SINGBOX_BIN="/bkupgrade/bin/sing-box"
+SINGBOX_CFG="/bkupgrade/data/singbox.json"
+
 case "$1" in
     start)
         echo "Starting open station-assistant services..."
-        if [ -x /bkupgrade/bin/sing-box ] && [ -f /bkupgrade/data/singbox.json ]; then
-            killall sing-box 2>/dev/null
-            nohup /bkupgrade/bin/sing-box run -c /bkupgrade/data/singbox.json </dev/null >/tmp/singbox.log 2>&1 &
+        if [ -x "$SINGBOX_BIN" ] && [ -f "$SINGBOX_CFG" ]; then
+            /sbin/start-stop-daemon -K -q -x "$SINGBOX_BIN" 2>/dev/null
+            /sbin/start-stop-daemon -S -b -q -x "$SINGBOX_BIN" -- run -c "$SINGBOX_CFG"
         fi
-        killall station-assistant 2>/dev/null
-        nohup /bkupgrade/bin/station-assistant /bkupgrade/data/config.json </dev/null >/tmp/assistant.log 2>&1 &
+        /sbin/start-stop-daemon -K -q -x "$DAEMON_BIN" 2>/dev/null
+        /sbin/start-stop-daemon -S -b -q -x "$DAEMON_BIN" -- "$DAEMON_CFG"
         ;;
     stop)
         echo "Stopping open station-assistant services..."
-        killall station-assistant 2>/dev/null
+        /sbin/start-stop-daemon -K -q -x "$DAEMON_BIN" 2>/dev/null
         killall station-spotter 2>/dev/null
         killall vl53l0x_ctrl 2>/dev/null
         killall tinycap 2>/dev/null
         killall tinyplay 2>/dev/null
-        killall sing-box 2>/dev/null
+        if [ -x "$SINGBOX_BIN" ]; then
+            /sbin/start-stop-daemon -K -q -x "$SINGBOX_BIN" 2>/dev/null
+        fi
         ;;
     restart)
         "$0" stop
