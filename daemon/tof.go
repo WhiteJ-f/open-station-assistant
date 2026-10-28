@@ -12,6 +12,7 @@ import (
 
 type ToFCallbacks struct {
 	OnPalmCover    func()
+	GetVolume      func() int
 	OnVolumeChange func(int)
 	OnHoverWake    func()
 }
@@ -34,7 +35,7 @@ func NewToFManager(callbacks ToFCallbacks, enabled bool) *ToFManager {
 		return tm
 	}
 
-	log.Println("[ToF] Starting intelligent VL53L0X ranging monitor (delay + stationary rejection)...")
+	log.Println("[ToF] Starting intelligent VL53L0X ranging monitor (relative volume + palm stop)...")
 	go tm.monitorWorker(callbacks)
 	return tm
 }
@@ -60,9 +61,9 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 
 	// Range constants (mm)
 	const (
-		palmMuteMaxDist = 35  // < 35mm palm cover
-		sliderMinDist   = 50  // 50mm -> 5%
-		sliderMaxDist   = 280 // 280mm -> 100%
+		palmMuteMaxDist = 38  // < 38mm hand directly over sensor
+		sliderMinDist   = 55  // 55mm
+		sliderMaxDist   = 300 // 300mm
 		maxValidDist    = 380 // > 380mm considered empty room / out of reach
 		activationDwell = 4   // ~280ms dwell before entering volume mode
 	)
@@ -70,6 +71,8 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 	var palmCoverCount int
 	var dwellCount int
 	var volumeModeActive bool
+	var anchorDist int = -1
+	var anchorVol int = -1
 	var lastReportedVol int = -1
 	var lastVolChange time.Time
 
@@ -104,6 +107,8 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			dwellCount = 0
 			if volumeModeActive {
 				volumeModeActive = false
+				anchorDist = -1
+				anchorVol = -1
 				log.Println("[ToF] Hand departed, volume adjustment mode locked.")
 			}
 			history = nil
@@ -124,17 +129,20 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			}
 		}
 
-		// 1. Palm cover detection (<35mm for 2 consecutive frames = ~140ms)
+		// 1. Palm cover / Hand over sensor: <38mm for 2 consecutive frames (~140ms)
+		// Action: STOP current playback/response and return to standby listening for wake-word immediately!
 		if dist < palmMuteMaxDist {
 			palmCoverCount++
 			if palmCoverCount == 2 {
-				log.Println("[ToF] GESTURE: Palm cover detected -> Mute / Stop playback!")
+				log.Println("[ToF] GESTURE: Hand over sensor detected (<38mm) -> STOP to Standby!")
 				if cb.OnPalmCover != nil {
 					cb.OnPalmCover()
 				}
 			}
 			dwellCount = 0
 			volumeModeActive = false
+			anchorDist = -1
+			anchorVol = -1
 			continue
 		} else {
 			palmCoverCount = 0
@@ -166,6 +174,8 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 					// Stationary object detected for > 1.2s! Ignore it.
 					ignoredBaseline = sumD / len(history)
 					volumeModeActive = false
+					anchorDist = -1
+					anchorVol = -1
 					dwellCount = 0
 					log.Printf("[ToF] Stationary obstacle detected at %d mm -> Ignored as background.", ignoredBaseline)
 					continue
@@ -175,32 +185,42 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			}
 		}
 
-		// 2. Volume control with activation dwell delay
+		// 2. Relative distance volume control:
+		// Hold hand to activate anchor -> Move UP = increase volume, Move DOWN = decrease volume!
 		if dist >= sliderMinDist && dist <= sliderMaxDist {
 			if !volumeModeActive {
 				dwellCount++
 				if dwellCount >= activationDwell {
 					volumeModeActive = true
-					log.Printf("[ToF] Dwell confirmed (%d mm) -> Volume control ACTIVE", dist)
+					anchorDist = dist
+					if cb.GetVolume != nil {
+						anchorVol = cb.GetVolume()
+					} else {
+						anchorVol = 15
+					}
+					lastReportedVol = anchorVol
+					log.Printf("[ToF] Dwell confirmed: anchor at %d mm (current vol %d%%) -> Relative volume mode ACTIVE", dist, anchorVol)
 				}
-			}
+			} else {
+				// Hand is actively moving relative to initial anchor
+				// Moving hand UP (dist > anchorDist): volume increases
+				// Moving hand DOWN (dist < anchorDist): volume decreases
+				// Sensitivity: 250mm total stroke spans ~80% volume range (~3mm per 1% volume)
+				deltaDist := dist - anchorDist
+				deltaPct := (deltaDist * 80) / 200
+				newVol := anchorVol + deltaPct
+				if newVol < 5 {
+					newVol = 5
+				}
+				if newVol > 100 {
+					newVol = 100
+				}
 
-			if volumeModeActive && time.Since(lastVolChange) > 80*time.Millisecond {
-				// Map 50mm..280mm -> 5%..100%
-				pct := int(float64(dist-sliderMinDist)/float64(sliderMaxDist-sliderMinDist)*95.0) + 5
-				if pct < 5 {
-					pct = 5
-				}
-				if pct > 100 {
-					pct = 100
-				}
-
-				// Update if changed by >= 3% to balance smoothness and stability
-				if lastReportedVol == -1 || absDiff(pct, lastReportedVol) >= 3 {
-					lastReportedVol = pct
+				if absDiff(newVol, lastReportedVol) >= 4 && time.Since(lastVolChange) > 100*time.Millisecond {
+					lastReportedVol = newVol
 					lastVolChange = time.Now()
 					if cb.OnVolumeChange != nil {
-						cb.OnVolumeChange(pct)
+						cb.OnVolumeChange(newVol)
 					}
 				}
 			}

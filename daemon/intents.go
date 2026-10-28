@@ -93,14 +93,17 @@ func (ie *IntentEngine) TryHandle(text string) (IntentResult, error) {
 
 	// 4. Playback / Stop
 	if norm == "стоп" || norm == "хватит" || norm == "пауза" || norm == "останови" ||
-		norm == "замолчи" || norm == "выключись" || strings.Contains(norm, "останови музыку") ||
-		strings.Contains(norm, "выключи музыку") || strings.Contains(norm, "поставь на паузу") {
+		norm == "замолчи" || norm == "выключись" || norm == "тихо" || norm == "молчи" ||
+		norm == "отмена" || norm == "прекрати" || norm == "stop" || norm == "cancel" ||
+		strings.Contains(norm, "останови музыку") || strings.Contains(norm, "выключи музыку") ||
+		strings.Contains(norm, "поставь на паузу") || strings.Contains(norm, "хватит болтать") {
 		ie.player.Stop()
+		ie.player.PlayCancel()
 		ie.leds.SetMode(ModeIdle)
 		return IntentResult{
 			Handled: true,
 			Action:  "STOP",
-			Answer:  "Остановила.",
+			Answer:  "",
 		}, nil
 	}
 

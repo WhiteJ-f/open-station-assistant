@@ -52,22 +52,27 @@ func main() {
 
 	tofCallbacks := ToFCallbacks{
 		OnPalmCover: func() {
-			log.Println("[Gesture] Palm cover detected (<35mm) -> MUTE / STOP")
+			log.Println("[Gesture] Hand over sensor detected (<38mm) -> STOP & STANDBY")
 			player.Stop()
-			player.Mute()
-			leds.SetMode(ModeMute)
+			player.Unmute()
+			player.PlayCancel()
+			leds.SetMode(ModeIdle)
 			if cancelRecord != nil {
 				select {
 				case cancelRecord <- struct{}{}:
 				default:
 				}
 			}
-			time.Sleep(500 * time.Millisecond)
-			leds.SetMode(ModeIdle)
+			audio.SetPaused(false)
+			spotter.Reset()
+		},
+		GetVolume: func() int {
+			return player.GetVolume()
 		},
 		OnVolumeChange: func(vol int) {
 			player.SetVolume(vol)
 			leds.ShowVolume(vol)
+			player.PlayVolumeClick()
 		},
 		OnHoverWake: func() {
 			select {
@@ -168,38 +173,84 @@ func main() {
 				if intentRes.Answer != "" {
 					speakAnswer(intentRes.Answer, leds, player, audio, tts)
 				}
-				leds.SetMode(ModeIdle)
-				audio.SetPaused(false)
-				return
-			}
-
-			// 6. Query Groq LLM (Qwen / Llama) for conversational answers
-			leds.SetMode(ModeThinking)
-			llmResp, err := ai.AskLLM(query)
-			if err != nil {
-				log.Printf("[LLM] Error: %v", err)
-				speakAnswer("Произошла ошибка при обращении к серверу.", leds, player, audio, tts)
-				leds.SetMode(ModeIdle)
-				audio.SetPaused(false)
-				return
-			}
-
-			log.Printf("[LLM] Intent: %s, Answer: \"%s\"", llmResp.Intent, llmResp.Answer)
-
-			switch llmResp.Intent {
-			case "MUSIC":
-				_ = music.PlayQuery(llmResp.Param)
-			case "STOP":
-				player.Stop()
-				leds.SetMode(ModeIdle)
-			case "VOLUME":
-				if newVol, err := strconv.Atoi(llmResp.Param); err == nil {
-					player.SetVolume(newVol)
-					leds.ShowVolume(newVol)
-					player.PlayVolumeClick()
+			} else {
+				// 6. Query Groq LLM (Qwen / Llama) for conversational answers
+				leds.SetMode(ModeThinking)
+				llmResp, err := ai.AskLLM(query)
+				if err != nil {
+					log.Printf("[LLM] Error: %v", err)
+					speakAnswer("Произошла ошибка при обращении к серверу.", leds, player, audio, tts)
+					leds.SetMode(ModeIdle)
+					audio.SetPaused(false)
+					return
 				}
-			default:
-				speakAnswer(llmResp.Answer, leds, player, audio, tts)
+
+				log.Printf("[LLM] Intent: %s, Answer: \"%s\"", llmResp.Intent, llmResp.Answer)
+
+				switch llmResp.Intent {
+				case "MUSIC":
+					_ = music.PlayQuery(llmResp.Param)
+				case "STOP":
+					player.Stop()
+					player.PlayCancel()
+					leds.SetMode(ModeIdle)
+					audio.SetPaused(false)
+					return
+				case "VOLUME":
+					if newVol, err := strconv.Atoi(llmResp.Param); err == nil {
+						player.SetVolume(newVol)
+						leds.ShowVolume(newVol)
+						player.PlayVolumeClick()
+					}
+				default:
+					speakAnswer(llmResp.Answer, leds, player, audio, tts)
+				}
+			}
+
+			// 7. Continuous Conversation: Listen for follow-up questions for 5.5 seconds!
+			for followUp := 0; followUp < 2; followUp++ {
+				leds.SetMode(ModeListening)
+				audio.SetPaused(false)
+
+				followWav, err := audio.RecordSpeechWithVAD(5500*time.Millisecond, cancelRecord)
+				if err != nil || len(followWav) == 0 {
+					break
+				}
+
+				leds.SetMode(ModeThinking)
+				followQuery, err := ai.Transcribe(followWav)
+				if err != nil || strings.TrimSpace(followQuery) == "" {
+					break
+				}
+				log.Printf("[Follow-Up] \"%s\"", followQuery)
+
+				normFollow := strings.ToLower(strings.Trim(followQuery, " .,!?;:-_«»\"'…"))
+				if normFollow == "стоп" || normFollow == "хватит" || normFollow == "спасибо" ||
+					normFollow == "отмена" || normFollow == "пока" || normFollow == "stop" || normFollow == "cancel" {
+					player.PlayCancel()
+					break
+				}
+
+				if fIntent, _ := intents.TryHandle(followQuery); fIntent.Handled {
+					if fIntent.Action == "STOP" {
+						player.PlayCancel()
+						break
+					}
+					if fIntent.Answer != "" {
+						speakAnswer(fIntent.Answer, leds, player, audio, tts)
+					}
+					continue
+				}
+
+				fResp, err := ai.AskLLM(followQuery)
+				if err != nil {
+					break
+				}
+				if fResp.Intent == "STOP" {
+					player.PlayCancel()
+					break
+				}
+				speakAnswer(fResp.Answer, leds, player, audio, tts)
 			}
 
 			leds.SetMode(ModeIdle)
