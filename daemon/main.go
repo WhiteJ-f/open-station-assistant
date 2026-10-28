@@ -219,6 +219,6 @@ func speakAnswer(answer string, leds *LEDManager, player *AudioPlayer, audio *Au
 	}
 	log.Printf("[TTS] Synthesized in %v: \"%s\"", time.Since(start), answer)
 	audio.SetPaused(true)
-	_ = player.Play(outputWAV)
+	_ = player.PlayWithVU(outputWAV, leds.SetVoiceBrightness)
 	time.Sleep(50 * time.Millisecond)
 }

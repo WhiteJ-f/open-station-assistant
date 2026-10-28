@@ -5,9 +5,11 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 )
 
 type AudioPlayer struct {
@@ -153,6 +155,76 @@ func (ap *AudioPlayer) Play(filePath string) error {
 	ap.mu.Unlock()
 
 	return err
+}
+
+// PlayWithVU plays an audio file and invokes onFrameVU with the dynamic RMS level every 50ms.
+func (ap *AudioPlayer) PlayWithVU(filePath string, onFrameVU func(byte)) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return ap.Play(filePath)
+	}
+
+	var pcmSamples []int16
+	dataIdx := bytes.Index(data, []byte("data"))
+	if dataIdx != -1 && dataIdx+8 < len(data) {
+		pcmBytes := data[dataIdx+8:]
+		numSamples := len(pcmBytes) / 2
+		pcmSamples = make([]int16, numSamples)
+		for i := 0; i < numSamples; i++ {
+			pcmSamples[i] = int16(binary.LittleEndian.Uint16(pcmBytes[i*2 : i*2+2]))
+		}
+	}
+
+	// 50ms frame at 48kHz stereo = 4800 samples; mono = 2400 samples
+	frameSize := 4800
+	if len(data) >= 24 && binary.LittleEndian.Uint16(data[22:24]) == 1 {
+		frameSize = 2400
+	}
+
+	var vuLevels []byte
+	if len(pcmSamples) > 0 {
+		for i := 0; i < len(pcmSamples); i += frameSize {
+			end := i + frameSize
+			if end > len(pcmSamples) {
+				end = len(pcmSamples)
+			}
+			chunk := pcmSamples[i:end]
+			var sumSq float64
+			for _, s := range chunk {
+				sumSq += float64(s) * float64(s)
+			}
+			rms := math.Sqrt(sumSq / float64(len(chunk)))
+			// Map speech RMS (typically 200..4000) to brightness [6, 52]
+			level := byte(6.0 + (rms/2200.0)*46.0)
+			if level > 52 {
+				level = 52
+			}
+			if level < 6 {
+				level = 6
+			}
+			vuLevels = append(vuLevels, level)
+		}
+	}
+
+	doneChan := make(chan struct{})
+	if len(vuLevels) > 0 && onFrameVU != nil {
+		go func() {
+			ticker := time.NewTicker(50 * time.Millisecond)
+			defer ticker.Stop()
+			for _, lvl := range vuLevels {
+				select {
+				case <-doneChan:
+					return
+				case <-ticker.C:
+					onFrameVU(lvl)
+				}
+			}
+		}()
+	}
+
+	playErr := ap.Play(filePath)
+	close(doneChan)
+	return playErr
 }
 
 func (ap *AudioPlayer) PlayChime() {

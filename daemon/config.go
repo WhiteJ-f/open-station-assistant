@@ -45,7 +45,7 @@ func DefaultConfig() *Config {
 		WakeWords:           []string{"jarvis", "alexa"},
 		LocalWakeWordModel:  "alexa,jarvis",
 		WakeWordThreshold:   0.35,
-		SensorEnabled:       false,
+		SensorEnabled:       true,
 		City:                "Moscow",
 		Latitude:            55.7558,
 		Longitude:           37.6173,
