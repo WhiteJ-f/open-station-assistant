@@ -59,7 +59,6 @@ func (lm *LEDManager) initHardware() {
 	}
 	lm.i2cFile = os.NewFile(uintptr(fd), "/dev/i2c-0")
 
-	// Chip initialization (from hardware driver ring_linux.go):
 	// 1. Enable chip: reg 0x00 -> 0x01
 	_ = lm.writeReg(0x00, 0x01)
 
@@ -108,7 +107,7 @@ func (lm *LEDManager) ShowVolume(vol int) {
 	if lm.volumeTimer != nil {
 		lm.volumeTimer.Stop()
 	}
-	lm.volumeTimer = time.AfterFunc(1500*time.Millisecond, func() {
+	lm.volumeTimer = time.AfterFunc(1400*time.Millisecond, func() {
 		lm.mu.Lock()
 		defer lm.mu.Unlock()
 		if lm.currentMode == ModeVolume {
@@ -117,17 +116,30 @@ func (lm *LEDManager) ShowVolume(vol int) {
 	})
 }
 
+// StartupFlash briefly pulses the LED ring in vibrant purple for visual confirmation on boot.
+func (lm *LEDManager) StartupFlash() {
+	for step := 0; step < 14; step++ {
+		phase := float64(step) / 14.0 * math.Pi
+		pulse := byte(math.Sin(phase) * 55.0)
+		r := byte(float64(pulse) * 0.75)
+		var colors [12][3]byte
+		for i := 0; i < 12; i++ {
+			colors[i] = [3]byte{r, 0, pulse}
+		}
+		lm.writeLEDs(colors)
+		time.Sleep(50 * time.Millisecond)
+	}
+	var off [12][3]byte
+	lm.writeLEDs(off)
+}
+
 func (lm *LEDManager) writeLEDs(colors [12][3]byte) {
 	if lm.i2cFile == nil {
 		return
 	}
 
-	// 12 RGB LEDs = 36 channels
-	// In Yandex Station Mini hardware:
-	// For LED i (0..11):
-	// Channel (i*3 + 1): Blue
-	// Channel (i*3 + 2): Green
-	// Channel (i*3 + 3): Red
+	// 12 RGB LEDs = 36 channels:
+	// For LED i: (i*3 + 1)=Blue, (i*3 + 2)=Green, (i*3 + 3)=Red
 	for i := 0; i < 12; i++ {
 		chB := byte(i*3 + 1)
 		chG := byte(i*3 + 2)
@@ -138,12 +150,12 @@ func (lm *LEDManager) writeLEDs(colors [12][3]byte) {
 		_ = lm.writeReg(chR, colors[i][0]) // Red PWM
 	}
 
-	// CRITICAL: Must trigger PWM latch (0x4a) then commit update (0x25)
+	// Latch frame (0x4a) then commit update (0x25)
 	_ = lm.writeReg(0x4a, 0x00)
 	_ = lm.writeReg(0x25, 0x00)
 }
 
-// getVolumeColor returns smooth gradient color (Cyan -> Green -> Orange -> Crimson) based on volume (0..100)
+// getVolumeColor returns smooth gradient color (Cyan -> Green -> Amber -> Crimson) based on volume (0..100)
 func getVolumeColor(vol int) [3]byte {
 	if vol < 30 {
 		// 0..30%: Cyan / Deep Teal -> Green
@@ -171,7 +183,7 @@ func getVolumeColor(vol int) [3]byte {
 
 func (lm *LEDManager) animationLoop() {
 	var step int
-	ticker := time.NewTicker(70 * time.Millisecond)
+	ticker := time.NewTicker(65 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
@@ -219,7 +231,7 @@ func (lm *LEDManager) animationLoop() {
 				lm.writeLEDs(colors)
 
 			case ModeSpeaking:
-				// Dynamic voice-based purple
+				// Dynamic voice-based purple tracking vocal waveform amplitude
 				r := byte(float64(voiceB) * 0.70)
 				for i := 0; i < 12; i++ {
 					colors[i] = [3]byte{r, 0, voiceB}
@@ -227,7 +239,7 @@ func (lm *LEDManager) animationLoop() {
 				lm.writeLEDs(colors)
 
 			case ModeVolume:
-				// Original-alike volume arc with dynamic color gradient
+				// Discrete 10-step / 12-LED volume arc with authentic color gradient
 				numLEDs := int(math.Round(float64(vol) * 12.0 / 100.0))
 				if numLEDs < 1 && vol > 0 {
 					numLEDs = 1
@@ -244,7 +256,7 @@ func (lm *LEDManager) animationLoop() {
 				lm.writeLEDs(colors)
 
 			case ModeMusic:
-				// Visualizer for music playback
+				// Multi-color dynamic audio visualizer for music
 				for i := 0; i < 12; i++ {
 					phase := float64(step*3+i*2) * 0.25
 					intensity := (math.Sin(phase) + 1.0) / 2.0
@@ -261,7 +273,7 @@ func (lm *LEDManager) animationLoop() {
 				lm.writeLEDs(colors)
 
 			case ModeMute:
-				// Red when muted
+				// Solid red when muted
 				for i := 0; i < 12; i++ {
 					colors[i] = [3]byte{55, 0, 0}
 				}

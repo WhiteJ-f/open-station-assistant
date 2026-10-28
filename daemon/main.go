@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -47,32 +49,47 @@ func main() {
 	weather := NewWeatherService(cfg.City, cfg.Latitude, cfg.Longitude)
 	intents := NewIntentEngine(cfg, player, leds, weather)
 
+	// Cancellation coordination for palm cover & stop gestures
+	var mu sync.Mutex
+	var activeCancel context.CancelFunc
 	var cancelRecord chan struct{}
+
 	hoverWakeChan := make(chan struct{}, 1)
 
 	tofCallbacks := ToFCallbacks{
 		OnPalmCover: func() {
-			log.Println("[Gesture] Hand over sensor detected (<38mm) -> STOP & STANDBY")
-			player.Stop()
-			player.Unmute()
-			player.PlayCancel()
-			leds.SetMode(ModeIdle)
+			log.Println("[Gesture] Hand over sensor detected (<42mm) -> STOP EVERYTHING TO STANDBY!")
+			mu.Lock()
+			if activeCancel != nil {
+				activeCancel()
+				activeCancel = nil
+			}
 			if cancelRecord != nil {
 				select {
 				case cancelRecord <- struct{}{}:
 				default:
 				}
 			}
+			mu.Unlock()
+
+			player.Stop()
+			player.Unmute()
+			player.PlayCancel()
+			leds.SetMode(ModeIdle)
 			audio.SetPaused(false)
 			spotter.Reset()
 		},
 		GetVolume: func() int {
 			return player.GetVolume()
 		},
+		OnVolumeModeStart: func(vol int) {
+			leds.ShowVolume(vol)
+			player.PlayVolumeClick()
+		},
 		OnVolumeChange: func(vol int) {
 			player.SetVolume(vol)
 			leds.ShowVolume(vol)
-			go player.PlayVolumeClick()
+			player.PlayVolumeClick()
 		},
 		OnHoverWake: func() {
 			select {
@@ -92,10 +109,14 @@ func main() {
 		}
 	}()
 
-	// Play authentic startup chime
+	// Visual and acoustic confirmation on startup:
+	// 1. Purple ring pulse for 1s
+	// 2. Authentic startup chime
+	go leds.StartupFlash()
 	audio.SetPaused(true)
+	player.Unmute()
 	player.PlayChime()
-	time.Sleep(400 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	audio.SetPaused(false)
 	log.Println("[Daemon] System ready. Listening locally for wake words (zero cloud traffic)...")
 
@@ -123,6 +144,21 @@ func main() {
 
 			_ = wakeSource
 
+			ctx, cancel := context.WithCancel(context.Background())
+			mu.Lock()
+			activeCancel = cancel
+			cancelRecord = make(chan struct{}, 1)
+			mu.Unlock()
+
+			defer func() {
+				mu.Lock()
+				if activeCancel != nil {
+					activeCancel()
+					activeCancel = nil
+				}
+				mu.Unlock()
+			}()
+
 			// 1. INSTANT CHIME (<50ms): Authentic "Ту-дум!" rings immediately!
 			audio.SetPaused(true)
 			spotter.Reset()
@@ -133,13 +169,14 @@ func main() {
 			leds.SetMode(ModeListening)
 			audio.SetPaused(false)
 
-			cancelRecord = make(chan struct{}, 1)
 			questionWav, err := audio.RecordSpeechWithVAD(7*time.Second, cancelRecord)
-			if err != nil {
-				if err != ErrNoSpeech {
-					log.Printf("[VAD] %v", err)
+			if err != nil || ctx.Err() != nil {
+				if ctx.Err() == nil && err == ErrNoSpeech {
+					// User said nothing: play stop chime when it stops listening!
+					player.PlayCancel()
 				}
 				leds.SetMode(ModeIdle)
+				audio.SetPaused(false)
 				return
 			}
 
@@ -148,10 +185,13 @@ func main() {
 			spotter.Reset()
 			leds.SetMode(ModeThinking)
 
-			// 4. Send ONLY the recorded question to Groq Whisper STT
+			// 4. Send recorded question to Groq Whisper STT
 			query, err := ai.Transcribe(questionWav)
-			if err != nil || strings.TrimSpace(query) == "" {
-				log.Printf("[STT] Empty or error: %v", err)
+			if err != nil || strings.TrimSpace(query) == "" || ctx.Err() != nil {
+				if ctx.Err() == nil {
+					// Empty speech / recognition failure: play stop chime!
+					player.PlayCancel()
+				}
 				leds.SetMode(ModeIdle)
 				audio.SetPaused(false)
 				return
@@ -159,8 +199,7 @@ func main() {
 
 			log.Printf("[User Query] \"%s\"", query)
 
-			// 5. Try deterministic local intent first (Time, Date, Volume, Playback, Weather)
-			// Zero LLM latency, 100% privacy!
+			// 5. Check deterministic local intent first (Time, Date, Volume, Playback, Weather)
 			intentRes, _ := intents.TryHandle(query)
 			if intentRes.Handled {
 				log.Printf("[Intent] Handled locally: %s -> Answer: \"%s\"", intentRes.Action, intentRes.Answer)
@@ -170,16 +209,18 @@ func main() {
 					return
 				}
 
-				if intentRes.Answer != "" {
-					speakAnswer(intentRes.Answer, leds, player, audio, tts)
+				if intentRes.Answer != "" && ctx.Err() == nil {
+					speakAnswer(ctx, intentRes.Answer, leds, player, audio, tts)
 				}
 			} else {
 				// 6. Query Groq LLM (Qwen / Llama) for conversational answers
 				leds.SetMode(ModeThinking)
 				llmResp, err := ai.AskLLM(query)
-				if err != nil {
-					log.Printf("[LLM] Error: %v", err)
-					speakAnswer("Произошла ошибка при обращении к серверу.", leds, player, audio, tts)
+				if err != nil || ctx.Err() != nil {
+					if ctx.Err() == nil {
+						speakAnswer(ctx, "Произошла ошибка при обращении к серверу.", leds, player, audio, tts)
+						player.PlayCancel()
+					}
 					leds.SetMode(ModeIdle)
 					audio.SetPaused(false)
 					return
@@ -203,30 +244,51 @@ func main() {
 						player.PlayVolumeClick()
 					}
 				default:
-					speakAnswer(llmResp.Answer, leds, player, audio, tts)
+					if ctx.Err() == nil {
+						speakAnswer(ctx, llmResp.Answer, leds, player, audio, tts)
+					}
 				}
+			}
+
+			if ctx.Err() != nil {
+				leds.SetMode(ModeIdle)
+				audio.SetPaused(false)
+				return
 			}
 
 			// 7. Continuous Conversation: Listen for follow-up questions for 5.5 seconds!
 			for followUp := 0; followUp < 2; followUp++ {
+				if ctx.Err() != nil {
+					break
+				}
+
 				leds.SetMode(ModeListening)
 				audio.SetPaused(false)
 
 				followWav, err := audio.RecordSpeechWithVAD(5500*time.Millisecond, cancelRecord)
-				if err != nil || len(followWav) == 0 {
+				if err != nil || len(followWav) == 0 || ctx.Err() != nil {
+					// Follow-up timeout / no speech: play stop chime whenever it stops listening!
+					if ctx.Err() == nil {
+						player.PlayCancel()
+					}
 					break
 				}
 
 				leds.SetMode(ModeThinking)
 				followQuery, err := ai.Transcribe(followWav)
-				if err != nil || strings.TrimSpace(followQuery) == "" {
+				if err != nil || strings.TrimSpace(followQuery) == "" || ctx.Err() != nil {
+					if ctx.Err() == nil {
+						player.PlayCancel()
+					}
 					break
 				}
 				log.Printf("[Follow-Up] \"%s\"", followQuery)
 
 				normFollow := strings.ToLower(strings.Trim(followQuery, " .,!?;:-_«»\"'…"))
 				if normFollow == "стоп" || normFollow == "хватит" || normFollow == "спасибо" ||
-					normFollow == "отмена" || normFollow == "пока" || normFollow == "stop" || normFollow == "cancel" {
+					normFollow == "отмена" || normFollow == "пока" || normFollow == "все" ||
+					normFollow == "отбой" || normFollow == "все спасибо" ||
+					normFollow == "stop" || normFollow == "cancel" {
 					player.PlayCancel()
 					break
 				}
@@ -236,21 +298,26 @@ func main() {
 						player.PlayCancel()
 						break
 					}
-					if fIntent.Answer != "" {
-						speakAnswer(fIntent.Answer, leds, player, audio, tts)
+					if fIntent.Answer != "" && ctx.Err() == nil {
+						speakAnswer(ctx, fIntent.Answer, leds, player, audio, tts)
 					}
 					continue
 				}
 
 				fResp, err := ai.AskLLM(followQuery)
-				if err != nil {
+				if err != nil || ctx.Err() != nil {
+					if ctx.Err() == nil {
+						player.PlayCancel()
+					}
 					break
 				}
 				if fResp.Intent == "STOP" {
 					player.PlayCancel()
 					break
 				}
-				speakAnswer(fResp.Answer, leds, player, audio, tts)
+				if ctx.Err() == nil {
+					speakAnswer(ctx, fResp.Answer, leds, player, audio, tts)
+				}
 			}
 
 			leds.SetMode(ModeIdle)
@@ -259,13 +326,19 @@ func main() {
 	}
 }
 
-func speakAnswer(answer string, leds *LEDManager, player *AudioPlayer, audio *AudioCapture, tts *TTSClient) {
+func speakAnswer(ctx context.Context, answer string, leds *LEDManager, player *AudioPlayer, audio *AudioCapture, tts *TTSClient) {
+	if ctx.Err() != nil {
+		return
+	}
 	leds.SetMode(ModeSpeaking)
 	outputWAV := "/tmp/tts_response.wav"
 	currentVol := player.GetVolume()
 	start := time.Now()
 	if err := tts.SynthesizeToWAV(answer, outputWAV, currentVol); err != nil {
 		log.Printf("[TTS] Synthesis error: %v", err)
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	log.Printf("[TTS] Synthesized in %v: \"%s\"", time.Since(start), answer)

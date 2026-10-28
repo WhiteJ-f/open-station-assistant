@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,6 +23,7 @@ type AudioPlayer struct {
 	scaledChime  string
 	scaledCancel string
 	scaledVolume string
+	clickActive  int32
 }
 
 func NewAudioPlayer(cfg *Config) *AudioPlayer {
@@ -42,34 +44,33 @@ func NewAudioPlayer(cfg *Config) *AudioPlayer {
 
 func (ap *AudioPlayer) SetVolume(vol int) {
 	ap.mu.Lock()
-	defer ap.mu.Unlock()
-	if vol < 0 {
-		vol = 0
+	if vol < 5 {
+		vol = 5
 	}
 	if vol > 100 {
 		vol = 100
 	}
 	ap.volume = vol
 
-	// Safe analog floor mapping for CS8571E amplifier
+	// Safe analog master floor mapping for CS8571E hardware amplifier
 	var val int
-	if vol == 0 {
-		val = 0
-	} else if vol <= 30 {
+	if vol <= 30 {
 		val = 1
 	} else if vol <= 70 {
 		val = 2
 	} else {
 		val = 3
 	}
+	ap.mu.Unlock()
 
-	_ = exec.Command("/bin/tinymix", "-D", "0", "set", "177", fmt.Sprintf("%d", val), fmt.Sprintf("%d", val)).Run()
-	log.Printf("[Player] Volume set to %d%% (Master ALSA: %d/32)", ap.volume, val)
-
-	// Pre-scale all sound effects in memory to match current volume level exactly
-	ap.rescaleWAV(ap.chimePath, ap.scaledChime, vol)
-	ap.rescaleWAV(ap.cancelPath, ap.scaledCancel, vol)
-	ap.rescaleWAV(ap.volumePath, ap.scaledVolume, vol)
+	// Update hardware mixer in background or quickly without blocking ToF
+	go func(targetVal, currentVol int) {
+		_ = exec.Command("/bin/tinymix", "-D", "0", "set", "177", fmt.Sprintf("%d", targetVal), fmt.Sprintf("%d", targetVal)).Run()
+		// Pre-scale sound effects asynchronously so disk I/O never causes UI lag
+		ap.rescaleWAV(ap.chimePath, ap.scaledChime, currentVol)
+		ap.rescaleWAV(ap.cancelPath, ap.scaledCancel, currentVol)
+		ap.rescaleWAV(ap.volumePath, ap.scaledVolume, currentVol)
+	}(val, vol)
 }
 
 func (ap *AudioPlayer) rescaleWAV(srcPath, dstPath string, vol int) {
@@ -81,7 +82,6 @@ func (ap *AudioPlayer) rescaleWAV(srcPath, dstPath string, vol int) {
 	scaled := make([]byte, len(data))
 	copy(scaled, data)
 
-	// Dynamically locate the data chunk
 	dataIdx := bytes.Index(scaled, []byte("data"))
 	if dataIdx == -1 || dataIdx+8 >= len(scaled) {
 		return
@@ -89,7 +89,6 @@ func (ap *AudioPlayer) rescaleWAV(srcPath, dstPath string, vol int) {
 	pcmStart := dataIdx + 8
 
 	scale := float64(vol) / 100.0
-	// Scale 16-bit PCM samples
 	for i := pcmStart; i+1 < len(scaled); i += 2 {
 		sample := int16(binary.LittleEndian.Uint16(scaled[i : i+2]))
 		newSample := int16(float64(sample) * scale)
@@ -108,7 +107,6 @@ func (ap *AudioPlayer) GetVolume() int {
 func (ap *AudioPlayer) Mute() {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
-	// Shutdown amplifier (tinymix 176 1 -> gpio-413 out lo -> AMPLIFIER SHUTDOWN)
 	_ = exec.Command("/bin/tinymix", "-D", "0", "set", "176", "1").Run()
 	log.Println("[Player] Hardware speaker muted (CS8571E shutdown)")
 }
@@ -116,7 +114,6 @@ func (ap *AudioPlayer) Mute() {
 func (ap *AudioPlayer) Unmute() {
 	ap.mu.Lock()
 	defer ap.mu.Unlock()
-	// Enable amplifier (tinymix 176 0 -> gpio-413 out hi -> AMPLIFIER POWER ON)
 	_ = exec.Command("/bin/tinymix", "-D", "0", "set", "176", "0").Run()
 	log.Println("[Player] Hardware speaker unmuted (CS8571E enabled)")
 }
@@ -139,7 +136,6 @@ func (ap *AudioPlayer) Play(filePath string) error {
 	}
 
 	ap.mu.Lock()
-	// Ensure CS8571E amplifier is ENABLED (tinymix 176 0 -> gpio-413 out hi)
 	_ = exec.Command("/bin/tinymix", "-D", "0", "set", "176", "0").Run()
 
 	cmd := exec.Command("/bin/tinyplay", filePath, "-D", "0", "-d", "0")
@@ -157,7 +153,6 @@ func (ap *AudioPlayer) Play(filePath string) error {
 	return err
 }
 
-// PlayWithVU plays an audio file and invokes onFrameVU with the dynamic RMS level every 50ms.
 func (ap *AudioPlayer) PlayWithVU(filePath string, onFrameVU func(byte)) error {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -175,7 +170,6 @@ func (ap *AudioPlayer) PlayWithVU(filePath string, onFrameVU func(byte)) error {
 		}
 	}
 
-	// 50ms frame at 48kHz stereo = 4800 samples; mono = 2400 samples
 	frameSize := 4800
 	if len(data) >= 24 && binary.LittleEndian.Uint16(data[22:24]) == 1 {
 		frameSize = 2400
@@ -194,7 +188,6 @@ func (ap *AudioPlayer) PlayWithVU(filePath string, onFrameVU func(byte)) error {
 				sumSq += float64(s) * float64(s)
 			}
 			rms := math.Sqrt(sumSq / float64(len(chunk)))
-			// Map speech RMS (typically 200..4000) to brightness [6, 52]
 			level := byte(6.0 + (rms/2200.0)*46.0)
 			if level > 52 {
 				level = 52
@@ -247,12 +240,20 @@ func (ap *AudioPlayer) PlayCancel() {
 	}
 }
 
+// PlayVolumeClick plays a crisp, single-flight click on volume changes without blocking ToF.
 func (ap *AudioPlayer) PlayVolumeClick() {
-	target := ap.scaledVolume
-	if _, err := os.Stat(target); err != nil {
-		target = ap.volumePath
+	if !atomic.CompareAndSwapInt32(&ap.clickActive, 0, 1) {
+		return // Another click is actively playing; skip to avoid ALSA contention
 	}
-	if _, err := os.Stat(target); err == nil {
-		_ = exec.Command("/bin/tinyplay", target, "-D", "0", "-d", "0").Run()
-	}
+
+	go func() {
+		defer atomic.StoreInt32(&ap.clickActive, 0)
+		target := ap.scaledVolume
+		if _, err := os.Stat(target); err != nil {
+			target = ap.volumePath
+		}
+		if _, err := os.Stat(target); err == nil {
+			_ = exec.Command("/bin/tinyplay", target, "-D", "0", "-d", "0").Run()
+		}
+	}()
 }

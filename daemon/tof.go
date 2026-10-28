@@ -11,10 +11,11 @@ import (
 )
 
 type ToFCallbacks struct {
-	OnPalmCover    func()
-	GetVolume      func() int
-	OnVolumeChange func(int)
-	OnHoverWake    func()
+	OnPalmCover       func()
+	GetVolume         func() int
+	OnVolumeModeStart func(int)
+	OnVolumeChange    func(int)
+	OnHoverWake       func()
 }
 
 type ToFManager struct {
@@ -31,11 +32,11 @@ func NewToFManager(callbacks ToFCallbacks, enabled bool) *ToFManager {
 	}
 
 	if !enabled {
-		log.Println("[ToF] Laser proximity sensor DISABLED by configuration (testing mode)")
+		log.Println("[ToF] Laser proximity sensor DISABLED by configuration")
 		return tm
 	}
 
-	log.Println("[ToF] Starting intelligent VL53L0X ranging monitor (robust stationary rejection + relative volume)...")
+	log.Println("[ToF] Starting authentic VL53L0X ranging monitor (activation dwell + 10-step discrete tracking + palm stop)...")
 	go tm.monitorWorker(callbacks)
 	return tm
 }
@@ -59,29 +60,38 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 
 	scanner := bufio.NewScanner(stdout)
 
-	// Range constants (mm)
+	// Thresholds and geometric bounds (in millimeters)
 	const (
-		palmMuteMaxDist = 38  // < 38mm hand directly over sensor
-		sliderMinDist   = 55  // 55mm
-		sliderMaxDist   = 320 // 320mm
-		maxValidDist    = 400 // > 400mm considered empty room / out of reach
-		activationDwell = 4   // ~280ms dwell before entering volume mode
+		palmMuteMaxDist   = 42  // < 42mm hand flat over sensor (stop to standby)
+		volumeMinDist     = 65  // 65mm lower bound for hand height
+		volumeMaxDist     = 340 // 340mm upper bound for hand height
+		openAirMinDist    = 370 // > 370mm considered open air above speaker
+		activationDwellMs = 300 // 300ms stable hand dwell BEFORE entering volume mode
+		stepHeightMm      = 22  // ~22mm vertical hand displacement per volume level (1..10)
 	)
 
-	var palmCoverCount int
-	var dwellCount int
-	var volumeModeActive bool
-	var anchorDist int = -1
-	var anchorVol int = -1
-	var lastReportedVol int = -1
-	var lastVolChange time.Time
+	var (
+		palmFrames int
 
-	// Stationary object rejection tracking
-	var history []int
-	const historySize = 12 // ~840ms rolling window
-	var ignoredMin int = -1
-	var ignoredMax int = -1
-	var stationarySince time.Time
+		// Activation dwell state
+		dwellAnchorDist int
+		dwellStartTime  time.Time
+
+		// Active volume state
+		volumeModeActive  bool
+		anchorDist        int
+		anchorLevel       int // 1..10
+		lastReportedLevel int
+
+		// Hand departure detection
+		openAirFrames int
+
+		// Stationary obstacle rejection
+		stationaryHistory []int
+		stationaryStart   time.Time
+		ignoredMin        int = -1
+		ignoredMax        int = -1
+	)
 
 	for scanner.Scan() {
 		select {
@@ -102,127 +112,140 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			continue
 		}
 
-		// 8190 = out of range / sensor open air
-		if dist <= 0 || dist >= 8000 || dist > maxValidDist {
-			palmCoverCount = 0
-			dwellCount = 0
-			if volumeModeActive {
-				volumeModeActive = false
-				anchorDist = -1
-				anchorVol = -1
-				log.Println("[ToF] Hand departed, volume adjustment mode locked.")
-			}
-			history = nil
-			stationarySince = time.Time{}
-			// Clear ignored baseline when sensor sees completely open air
-			if ignoredMin > 0 {
-				ignoredMin = -1
-				ignoredMax = -1
+		// 8190 = sensor out of range / open air
+		isOpenAir := (dist <= 0 || dist >= 8000 || dist > openAirMinDist)
+
+		if isOpenAir {
+			openAirFrames++
+			dwellStartTime = time.Time{}
+			palmFrames = 0
+
+			// Require ~120ms (4 frames) of continuous open air to confirm hand departure
+			if openAirFrames >= 4 {
+				if volumeModeActive {
+					volumeModeActive = false
+					log.Printf("[ToF] Hand departed -> Volume adjustment mode locked at %d%%.", lastReportedLevel*10)
+				}
+				// Reset ignored stationary baseline once clear open air is confirmed
+				if openAirFrames >= 15 {
+					ignoredMin = -1
+					ignoredMax = -1
+					stationaryHistory = nil
+					stationaryStart = time.Time{}
+				}
 			}
 			continue
 		}
 
-		// Check against ignored stationary obstacle (e.g. low shelf, ceiling, or static object)
+		openAirFrames = 0
+
+		// 1. Stationary obstacle filter (ignores ceilings, shelves, resting objects)
 		if ignoredMin > 0 && dist >= ignoredMin && dist <= ignoredMax {
-			// Object is within the ignored stationary zone: ignore completely!
-			palmCoverCount = 0
-			dwellCount = 0
-			if volumeModeActive {
-				volumeModeActive = false
-				anchorDist = -1
-				anchorVol = -1
-			}
+			dwellStartTime = time.Time{}
+			palmFrames = 0
 			continue
 		}
 
-		// 1. Palm cover / Hand over sensor: <38mm for 2 consecutive frames (~140ms)
-		// Action: STOP current playback/response and return to standby listening for wake-word immediately!
+		// 2. PALM COVER / HAND OVER SENSOR (< 42mm):
+		// Immediate gesture: STOP ANY RUNNING FUNCTION & RETURN TO STANDBY LISTENING!
 		if dist < palmMuteMaxDist {
-			palmCoverCount++
-			if palmCoverCount == 2 {
-				log.Println("[ToF] GESTURE: Hand over sensor detected (<38mm) -> STOP to Standby!")
+			palmFrames++
+			if palmFrames == 2 { // Confirmed over 2 consecutive frames (~60ms)
+				log.Println("[ToF] GESTURE: Hand-over-sensor (<42mm) -> STOP ALL TO STANDBY!")
 				if cb.OnPalmCover != nil {
 					cb.OnPalmCover()
 				}
 			}
-			dwellCount = 0
+			dwellStartTime = time.Time{}
 			volumeModeActive = false
-			anchorDist = -1
-			anchorVol = -1
 			continue
 		} else {
-			palmCoverCount = 0
+			palmFrames = 0
 		}
 
-		// Track stationary variance in a rolling window
-		history = append(history, dist)
-		if len(history) > historySize {
-			history = history[1:]
-		}
-
-		if len(history) == historySize {
-			minD, maxD := history[0], history[0]
-			for _, d := range history {
-				if d < minD {
-					minD = d
-				}
-				if d > maxD {
-					maxD = d
-				}
+		// 3. Stationary background obstacle detection:
+		// If height is unchanged (variance <= 12mm) for >= 1000ms while not actively adjusting volume, ignore it.
+		if !volumeModeActive {
+			stationaryHistory = append(stationaryHistory, dist)
+			if len(stationaryHistory) > 12 {
+				stationaryHistory = stationaryHistory[1:]
 			}
-			variance := maxD - minD
-			if variance <= 16 {
-				if stationarySince.IsZero() {
-					stationarySince = time.Now()
-				} else if time.Since(stationarySince) > 900*time.Millisecond {
-					// Stationary object detected for > 900ms! Ignore it as background.
-					ignoredMin = minD - 25
-					ignoredMax = maxD + 25
-					volumeModeActive = false
-					anchorDist = -1
-					anchorVol = -1
-					dwellCount = 0
-					log.Printf("[ToF] Stationary obstacle detected [%d..%d mm] -> Ignored as background.", ignoredMin, ignoredMax)
-					continue
+			if len(stationaryHistory) == 12 {
+				minD, maxD := stationaryHistory[0], stationaryHistory[0]
+				for _, d := range stationaryHistory {
+					if d < minD {
+						minD = d
+					}
+					if d > maxD {
+						maxD = d
+					}
 				}
-			} else {
-				stationarySince = time.Time{}
+				if (maxD - minD) <= 12 {
+					if stationaryStart.IsZero() {
+						stationaryStart = time.Now()
+					} else if time.Since(stationaryStart) >= 1000*time.Millisecond {
+						ignoredMin = minD - 20
+						ignoredMax = maxD + 20
+						dwellStartTime = time.Time{}
+						log.Printf("[ToF] Stationary surface detected [%d..%d mm] -> Ignored as background obstacle.", ignoredMin, ignoredMax)
+						continue
+					}
+				} else {
+					stationaryStart = time.Time{}
+				}
 			}
 		}
 
-		// 2. Relative distance volume control:
-		// Hold hand to activate anchor -> Move UP = increase volume, Move DOWN = decrease volume!
-		if dist >= sliderMinDist && dist <= sliderMaxDist {
+		// 4. VOLUME CONTROL ENGINE:
+		if dist >= volumeMinDist && dist <= volumeMaxDist {
 			if !volumeModeActive {
-				dwellCount++
-				if dwellCount >= activationDwell {
+				// PHASE A: DWELL DELAY BEFORE ACTIVATING
+				// Hand must enter volume zone and remain relatively steady for activationDwellMs
+				if dwellStartTime.IsZero() || absDiff(dist, dwellAnchorDist) > 25 {
+					dwellAnchorDist = dist
+					dwellStartTime = time.Now()
+				} else if time.Since(dwellStartTime) >= activationDwellMs*time.Millisecond {
+					// DWELL CONFIRMED! Activate volume mode immediately!
 					volumeModeActive = true
 					anchorDist = dist
+
+					currentVol := 15
 					if cb.GetVolume != nil {
-						anchorVol = cb.GetVolume()
-					} else {
-						anchorVol = 15
+						currentVol = cb.GetVolume()
 					}
-					lastReportedVol = anchorVol
-					log.Printf("[ToF] Dwell confirmed: anchor at %d mm (current vol %d%%) -> Relative volume mode ACTIVE", dist, anchorVol)
+					// Map 0..100% to discrete levels 1..10
+					anchorLevel = (currentVol + 5) / 10
+					if anchorLevel < 1 {
+						anchorLevel = 1
+					}
+					if anchorLevel > 10 {
+						anchorLevel = 10
+					}
+					lastReportedLevel = anchorLevel
+
+					log.Printf("[ToF] Dwell confirmed: anchor at %d mm (level %d/10, %d%%) -> Volume mode ACTIVE", dist, anchorLevel, anchorLevel*10)
+
+					if cb.OnVolumeModeStart != nil {
+						cb.OnVolumeModeStart(anchorLevel * 10)
+					}
 				}
 			} else {
-				// Hand is actively moving relative to initial anchor
-				// Moving hand UP (dist > anchorDist): volume increases
-				// Moving hand DOWN (dist < anchorDist): volume decreases
+				// PHASE B: ACTIVE VOLUME MODE (ZERO DELAY)
+				// Hand movement relative to initial anchor distance
 				deltaDist := dist - anchorDist
-				deltaPct := (deltaDist * 80) / 200
-				newVol := anchorVol + deltaPct
-				if newVol < 5 {
-					newVol = 5
+				stepChange := deltaDist / stepHeightMm
+
+				newLevel := anchorLevel + stepChange
+				if newLevel < 1 {
+					newLevel = 1
 				}
-				if newVol > 100 {
-					newVol = 100
+				if newLevel > 10 {
+					newLevel = 10
 				}
 
-				if absDiff(newVol, lastReportedVol) >= 4 && time.Since(lastVolChange) > 120*time.Millisecond {
-					lastReportedVol = newVol
-					lastVolChange = time.Now()
+				if newLevel != lastReportedLevel {
+					lastReportedLevel = newLevel
+					newVol := newLevel * 10
 					if cb.OnVolumeChange != nil {
 						cb.OnVolumeChange(newVol)
 					}
@@ -230,7 +253,7 @@ func (tm *ToFManager) monitorWorker(cb ToFCallbacks) {
 			}
 		} else {
 			if !volumeModeActive {
-				dwellCount = 0
+				dwellStartTime = time.Time{}
 			}
 		}
 	}

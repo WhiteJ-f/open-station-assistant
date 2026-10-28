@@ -52,11 +52,16 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
 1. **Strictly Local Wake Word (Zero Idle Traffic)**:
    - Wake word detection runs 100% locally on the speaker using a custom Rust engine powered by `tract-onnx`.
    - Bundled models: `alexa.onnx`, `hey_jarvis_v0.1.onnx`, `hey_mycroft_v0.1.onnx`, `ahoj_hugo.onnx`.
+   - Sensitivity calibrated to `0.20` threshold for reliable single-word invocation (*"Jarvis"*, *"Джарвис"*, *"Alexa"*).
    - Network bandwidth during listening is strictly **0 bytes/second**.
    - Negligible CPU footprint (~12% of a single core; overall system 85% idle).
 
-2. **Instant Response Latency**:
-   - Audio chime triggers directly on-device in **< 50ms**, providing instant auditory feedback identical to factory devices.
+2. **Instant Response Latency & Universal Stop Chime**:
+   - Audio chime triggers directly on-device in **< 50ms**, providing instant auditory feedback.
+   - **Universal Stop Chime**: Plays the authentic descending cancel chime (`spotter_cancel.mp3`) whenever the speaker stops listening:
+     - On user stop words (*"стоп"*, *"хватит"*, *"спасибо"*, *"отмена"*, *"выключи"*);
+     - On conversation or follow-up timeout (no speech detected);
+     - On hand-over-sensor gesture.
 
 3. **On-Device Human TTS**:
    - Speech synthesis runs locally on the speaker using a patched build of **RHVoice** (Anna and Elena 24kHz natural Russian voices).
@@ -71,19 +76,21 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
 5. **Hardware Peripheral Drivers & Gestures**:
    - **LED Ring**: Direct I2C driver on `/dev/i2c-0` (`0x3c`) controlling the 12 RGB LEDs (36 PWM channels):
      - *Standby (Idle)*: Completely OFF (0% light/power).
+     - *Startup Flash*: Vibrant purple ring pulse on boot confirming system readiness.
      - *Listening*: Smooth sinusoidal breathing purple (2.0s period).
      - *Thinking*: Rotating cyan-blue dot with a 4-LED decaying trail.
      - *Speaking*: Dynamic voice VU meter pulsing brightness in sync with speech waveforms.
      - *Volume Adjustment*: Proportional radial arc (1–12 LEDs) with continuous gradient shifting (Cyan $\to$ Green $\to$ Orange $\to$ Crimson).
    - **Intelligent ToF Gestures (ST VL53L0X)**:
-     - *Relative Height Volume*: Dwell activation anchor; raising hand increases volume, lowering hand decreases volume, with an audio click chime after each step.
-     - *Stationary Obstacle Rejection*: Static surfaces (shelves, ceilings, resting obstacles with $\le 16$mm variance for $> 900$ms) are automatically identified and ignored as background.
-     - *Palm Stop*: Covering the sensor ($< 38$mm) immediately stops playback, sounds the cancel chime, and returns directly to standby wake-word listening without muting.
+     - *Authentic Dwell Delay*: Requires 300ms of stable hand position in the detection zone (65–340mm) before volume mode activates, preventing accidental volume jumps when passing nearby.
+     - *Discrete 10-Step Tracking (Zero Lag)*: Once activated, vertical hand motion changes volume across 10 discrete levels (10%–100%) with an instant click sound and LED arc update per step.
+     - *Stationary Obstacle Rejection*: Static surfaces (shelves, ceilings, resting obstacles with $\le 12$mm variance for $> 1.0$s) are automatically identified and ignored as background.
+     - *Palm Stop*: Covering the sensor ($< 42$mm) immediately stops all speech/music/processing, sounds the cancel chime, and returns directly to standby wake-word listening.
 
 6. **Continuous Conversation (Follow-Up Mode)**:
    - After answering a question, the assistant stays in active follow-up listening mode for 5.5 seconds (breathing purple LED).
    - You can speak follow-up inquiries naturally without repeating the wake word.
-   - Saying *"Спасибо"*, *"Стоп"*, or allowing the timeout to expire smoothly returns the unit to standby.
+   - Saying *"Спасибо"*, *"Стоп"*, or allowing the timeout to expire sounds the stop chime and smoothly returns the unit to standby.
 
 ---
 
@@ -94,13 +101,13 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
 │   ├── ai.go                   # Whisper STT & LLM chat completions
 │   ├── audio.go                # ALSA capture, 150Hz HPF, 12x preamp, VAD
 │   ├── config.go               # Configuration structure & defaults
-│   ├── intents.go              # Intent router (weather, music, time, volume)
+│   ├── intents.go              # Intent router (weather, music, time, volume, stop)
 │   ├── led.go                  # TLC59116 I2C RGB ring controller
-│   ├── main.go                 # Event loop & process supervisor
+│   ├── main.go                 # Event loop, cancellation & process supervisor
 │   ├── music.go                # Music streaming service integration
-│   ├── player.go               # Tinyplay wrapper & digital volume staging
+│   ├── player.go               # Tinyplay wrapper, non-blocking click & digital staging
 │   ├── spotter.go              # IPC manager for local spotter
-│   ├── tof.go                  # VL53L0X gesture manager
+│   ├── tof.go                  # VL53L0X gesture manager (discrete 10-step & dwell)
 │   ├── tts.go                  # RHVoice on-device synthesis client
 │   └── weather.go              # Open-Meteo weather client
 ├── spotter/                    # Rust Local Wake Word Engine (openWakeWord)
@@ -112,7 +119,8 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
 │   └── rhvoice_synth.c         # C wrapper with 48kHz stereo upsampler
 ├── scripts/
 │   ├── build.sh                # Cross-compilation build helper
-│   └── start_services.sh       # On-boot service supervisor
+│   ├── start_services.sh       # Service startup helper
+│   └── S99station-assistant    # /etc/init.d/ on-boot autostart service script
 ├── config.example.json         # Example configuration file
 ├── .gitignore
 ├── LICENSE
@@ -137,8 +145,8 @@ Copy `config.example.json` to `/bkupgrade/data/config.json` on the device and po
   "default_volume": 15,
   "wake_words": ["jarvis", "alexa"],
   "local_wakeword_model": "alexa,jarvis",
-  "wakeword_threshold": 0.35,
-  "sensor_enabled": false,
+  "wakeword_threshold": 0.20,
+  "sensor_enabled": true,
   "city": "Moscow",
   "latitude": 55.7558,
   "longitude": 37.6173,
@@ -153,6 +161,17 @@ Copy `config.example.json` to `/bkupgrade/data/config.json` on the device and po
 In regions where cloud AI endpoints require proxy routing, you can run a local proxy client (e.g. `sing-box`, `byedpi`, or custom tunnels using protocols such as VLESS, SOCKS5, or Shadowsocks) bound to `127.0.0.1:1080`. 
 
 The Go daemon automatically checks for a local SOCKS5 proxy on `127.0.0.1:1080` and routes outbound HTTPS traffic through it transparently if available.
+
+---
+
+## Autostart on Boot
+
+To run the assistant automatically on device boot, install the init script:
+
+```bash
+cp scripts/S99station-assistant /etc/init.d/S99station-assistant
+chmod +x /etc/init.d/S99station-assistant
+```
 
 ---
 

@@ -91,12 +91,15 @@ func (ie *IntentEngine) TryHandle(text string) (IntentResult, error) {
 		}, nil
 	}
 
-	// 4. Playback / Stop
+	// 4. Playback / Stop / Dismissal Commands
 	if norm == "стоп" || norm == "хватит" || norm == "пауза" || norm == "останови" ||
 		norm == "замолчи" || norm == "выключись" || norm == "тихо" || norm == "молчи" ||
-		norm == "отмена" || norm == "прекрати" || norm == "stop" || norm == "cancel" ||
+		norm == "отмена" || norm == "прекрати" || norm == "спасибо" || norm == "все спасибо" ||
+		norm == "пока" || norm == "все" || norm == "отбой" || norm == "выключи" || norm == "и выключи" ||
+		norm == "stop" || norm == "cancel" ||
 		strings.Contains(norm, "останови музыку") || strings.Contains(norm, "выключи музыку") ||
-		strings.Contains(norm, "поставь на паузу") || strings.Contains(norm, "хватит болтать") {
+		strings.Contains(norm, "поставь на паузу") || strings.Contains(norm, "хватит болтать") ||
+		strings.Contains(norm, "выключи колонку") {
 		ie.player.Stop()
 		ie.player.PlayCancel()
 		ie.leds.SetMode(ModeIdle)
@@ -176,7 +179,6 @@ func (ie *IntentEngine) checkVolume(norm string) (bool, int) {
 		}
 	}
 
-	// Word numbers ("громкость один" ... "громкость десять")
 	wordNumbers := map[string]int{
 		"ноль": 5, "один": 10, "два": 20, "три": 30, "четыре": 40,
 		"пять": 50, "шесть": 60, "семь": 70, "восемь": 80, "девять": 90, "десять": 100,
@@ -190,3 +192,5 @@ func (ie *IntentEngine) checkVolume(norm string) (bool, int) {
 
 	return false, currentVol
 }
+
+
