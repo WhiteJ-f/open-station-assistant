@@ -12,7 +12,7 @@
 
 ## Overview
 
-Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / Amlogic A113X SoC) into a fully open, autonomous smart speaker. It replaces proprietary cloud daemons with an independent on-device pipeline:
+Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / Amlogic A113X SoC) into a fully opensource, autonomous smart speaker. It replaces proprietary cloud daemons with an independent on-device pipeline:
 
 ```
 [ MEMS Microphones (Ch 0+1) ]
@@ -81,7 +81,7 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
      - *Thinking*: Rotating cyan-blue dot with a 4-LED decaying trail.
      - *Speaking*: Dynamic voice VU meter pulsing brightness in sync with speech waveforms.
      - *Volume Adjustment*: Proportional radial arc (1–12 LEDs) with continuous gradient shifting (Cyan $\to$ Green $\to$ Orange $\to$ Crimson).
-   - **Intelligent ToF Gestures (ST VL53L0X)**:
+   - **ToF Gestures (ST VL53L0X) *DISABLED BY DEFAULT***:
      - *Authentic Dwell Delay*: Requires 300ms of stable hand position in the detection zone (65–340mm) before volume mode activates, preventing accidental volume jumps when passing nearby.
      - *Discrete 10-Step Tracking (Zero Lag)*: Once activated, vertical hand motion changes volume across 10 discrete levels (10%–100%) with an instant click sound and LED arc update per step.
      - *Stationary Obstacle Rejection*: Static surfaces (shelves, ceilings, resting obstacles with $\le 12$mm variance for $> 1.0$s) are automatically identified and ignored as background.
@@ -91,41 +91,6 @@ Open Station Assistant turns a rooted **Yandex Station Mini 1** (Linkplay A98 / 
    - After answering a question, the assistant stays in active follow-up listening mode for 5.5 seconds (breathing purple LED).
    - You can speak follow-up inquiries naturally without repeating the wake word.
    - Saying *"Спасибо"*, *"Стоп"*, or allowing the timeout to expire sounds the stop chime and smoothly returns the unit to standby.
-
----
-
-## Repository Structure
-
-```text
-├── daemon/                     # Go Assistant Daemon
-│   ├── ai.go                   # Whisper STT & LLM chat completions
-│   ├── audio.go                # ALSA capture, 150Hz HPF, 3x preamp, VAD
-│   ├── config.go               # Configuration structure & defaults
-│   ├── intents.go              # Intent router (weather, music, time, volume, stop)
-│   ├── led.go                  # TLC59116 I2C RGB ring controller
-│   ├── main.go                 # Event loop, cancellation & process supervisor
-│   ├── music.go                # Music streaming service integration
-│   ├── player.go               # Tinyplay wrapper, non-blocking click & digital staging
-│   ├── spotter.go              # IPC manager for local spotter
-│   ├── tof.go                  # VL53L0X gesture manager (discrete 10-step & dwell)
-│   ├── tts.go                  # RHVoice on-device synthesis client
-│   └── weather.go              # Open-Meteo weather client
-├── spotter/                    # Rust Local Wake Word Engine (openWakeWord)
-│   ├── Cargo.toml
-│   ├── src/main.rs             # tract-onnx acoustic inference engine
-│   ├── models/                 # Spectrogram and embedding ONNX models
-│   └── speech_models/          # Wake word classifier heads
-├── tts/                        # RHVoice Standalone Integration
-│   └── rhvoice_synth.c         # C wrapper with 48kHz stereo upsampler
-├── scripts/
-│   ├── build.sh                # Cross-compilation build helper
-│   ├── start_services.sh       # Service startup helper
-│   └── S99station-assistant    # /etc/init.d/ on-boot autostart service script
-├── config.example.json         # Example configuration file
-├── .gitignore
-├── LICENSE
-└── README.md
-```
 
 ---
 
@@ -151,14 +116,14 @@ Copy `config.example.json` to `/bkupgrade/data/config.json` on the device and po
   "latitude": 55.7558,
   "longitude": 37.6173,
   "timezone_offset_hours": 3,
-  "byedpi_enabled": false,
-  "byedpi_port": 1080
+  "proxy_enabled": false,
+  "proxy_port": 1080
 }
 ```
 
 ### Network & Region Bypass
 
-In regions where cloud AI endpoints require proxy routing, you can run a local proxy client (e.g. `sing-box`, `byedpi`, or custom tunnels using protocols such as VLESS, SOCKS5, or Shadowsocks) bound to `127.0.0.1:1080`. 
+In regions where cloud AI endpoints require proxy routing, you can run a local proxy client (e.g. `sing-box` or custom tunnels using protocols such as VLESS, SOCKS5, or Shadowsocks) bound to `127.0.0.1:1080`. 
 
 The Go daemon automatically checks for a local SOCKS5 proxy on `127.0.0.1:1080` and routes outbound HTTPS traffic through it transparently if available.
 
@@ -184,13 +149,13 @@ The Go daemon automatically checks for a local SOCKS5 proxy on `127.0.0.1:1080` 
 | `city` | string | `Moscow` | City name for weather queries |
 | `latitude` / `longitude` | float | `55.7558` / `37.6173` | Coordinates for Open-Meteo weather API |
 | `timezone_offset_hours` | int | `3` | UTC offset for time queries |
-| `byedpi_enabled` | bool | `false` | Enable local byedpi/sing-box proxy routing on `127.0.0.1:1080` |
+| `proxy_enabled` | bool | `false` | Enable local byedpi/sing-box proxy routing on `127.0.0.1:1080` |
 | `byedpi_port` | int | `1080` | Local SOCKS5 proxy port |
 
 > [!NOTE]
 > **ToF Gesture Sensor (`sensor_enabled`)**
 >
-> The ST VL53L0X time-of-flight sensor enables hand gesture volume control and palm-cover stop. It is **disabled by default** because it requires the `/usr/bin/vl53l0x_ctrl` kernel driver binary present on the Yandex Station Mini 1 — it is not available on other hardware.
+> The ST VL53L0X time-of-flight sensor enables hand gesture volume control and palm-cover stop. It is **disabled by default** because it is still in testing phase and does not work reliably.
 >
 > When enabled, the sensor runs a background worker that:
 > - Waits for a hand held **65–340 mm** above the speaker for **280 ms** (dwell activation), then activates a discrete 10-step volume arc shown on the LED ring.
@@ -198,7 +163,7 @@ The Go daemon automatically checks for a local SOCKS5 proxy on `127.0.0.1:1080` 
 > - Stationary objects (ceiling, shelves) held motionless for >6 s are automatically classified as background and ignored.
 > - Covering the sensor with a flat palm (**< 45 mm**) instantly stops any active speech, music, or LLM stream, sounds the cancel chime, and returns to standby listening.
 >
-> To enable on a compatible device, set `"sensor_enabled": true` in `config.json`.
+> To enable, set `"sensor_enabled": true` in `config.json`.
 
 ---
 
@@ -258,4 +223,4 @@ Or build components individually:
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT](LICENSE) license,.

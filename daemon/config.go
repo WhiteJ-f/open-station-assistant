@@ -27,8 +27,8 @@ type Config struct {
 	Latitude           float64  `json:"latitude"`
 	Longitude          float64  `json:"longitude"`
 	TimezoneOffsetHours int     `json:"timezone_offset_hours"`
-	ByeDPIEnabled      bool     `json:"byedpi_enabled"`
-	ByeDPIPort         int      `json:"byedpi_port"`
+	ProxyEnabled      bool     `json:"proxy_enabled"`
+	ProxyPort         int      `json:"proxy_port"`
 }
 
 func DefaultConfig() *Config {
@@ -52,8 +52,8 @@ func DefaultConfig() *Config {
 		Latitude:            55.7558,
 		Longitude:           37.6173,
 		TimezoneOffsetHours: 3,
-		ByeDPIEnabled:       true,
-		ByeDPIPort:          1080,
+		ProxyEnabled:       true,
+		ProxyPort:          1080,
 	}
 }
 

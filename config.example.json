@@ -19,6 +19,6 @@
   "latitude": 55.7558,
   "longitude": 37.6173,
   "timezone_offset_hours": 3,
-  "byedpi_enabled": false,
-  "byedpi_port": 1080
+  "proxy_enabled": false,
+  "proxy_port": 1080
 }

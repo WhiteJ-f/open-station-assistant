@@ -36,8 +36,8 @@ type AICenter struct {
 func NewAICenter(cfg *Config) *AICenter {
 	var transport *http.Transport
 
-	if cfg.ByeDPIEnabled {
-		dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.ByeDPIPort), nil, proxy.Direct)
+	if cfg.ProxyEnabled {
+		dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.ProxyPort), nil, proxy.Direct)
 		if err == nil {
 			transport = &http.Transport{
 				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
