@@ -1,16 +1,22 @@
 #!/bin/sh
-# /etc/init.d/S99station-assistant
-# Autostart open station assistant on boot for Yandex Station Mini 1
+### BEGIN INIT INFO
+# Provides:          station-assistant
+# Required-Start:    $network $local_fs
+# Required-Stop:
+# Default-Start:     S
+# Default-Stop:      0 6
+# Short-Description: Open Yandex Station Mini Standalone Assistant Daemon
+### END INIT INFO
 
 case "$1" in
     start)
         echo "Starting open station-assistant services..."
         if [ -x /bkupgrade/bin/sing-box ] && [ -f /bkupgrade/data/singbox.json ]; then
             killall sing-box 2>/dev/null
-            nohup /bkupgrade/bin/sing-box run -c /bkupgrade/data/singbox.json >/tmp/singbox.log 2>&1 &
+            nohup /bkupgrade/bin/sing-box run -c /bkupgrade/data/singbox.json </dev/null >/tmp/singbox.log 2>&1 &
         fi
         killall station-assistant 2>/dev/null
-        nohup /bkupgrade/bin/station-assistant /bkupgrade/data/config.json >/tmp/assistant.log 2>&1 &
+        nohup /bkupgrade/bin/station-assistant /bkupgrade/data/config.json </dev/null >/tmp/assistant.log 2>&1 &
         ;;
     stop)
         echo "Stopping open station-assistant services..."
@@ -18,15 +24,25 @@ case "$1" in
         killall station-spotter 2>/dev/null
         killall vl53l0x_ctrl 2>/dev/null
         killall tinycap 2>/dev/null
+        killall tinyplay 2>/dev/null
+        killall sing-box 2>/dev/null
         ;;
     restart)
-        $0 stop
+        "$0" stop
         sleep 1
-        $0 start
+        "$0" start
+        ;;
+    status)
+        if pidof station-assistant >/dev/null; then
+            echo "station-assistant is running (PID $(pidof station-assistant))"
+        else
+            echo "station-assistant is NOT running"
+        fi
         ;;
     *)
-        echo "Usage: $0 {start|stop|restart}"
+        echo "Usage: $0 {start|stop|restart|status}"
         exit 1
         ;;
 esac
+
 exit 0
