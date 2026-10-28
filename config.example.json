@@ -10,6 +10,7 @@
   "chime_sound": "/bkupgrade/data/chime.wav",
   "cancel_sound": "/bkupgrade/data/cancel.wav",
   "volume_sound": "/bkupgrade/data/volume.wav",
+  "startup_sound": "/bkupgrade/data/startup.wav",
   "wake_words": ["jarvis", "alexa"],
   "local_wakeword_model": "alexa,jarvis",
   "wakeword_threshold": 0.20,
